@@ -57,11 +57,16 @@ src/
 │   ├── status.rs     # ralph status
 │   ├── cancel.rs     # ralph cancel
 │   ├── revert.rs     # ralph revert
-│   └── clean.rs      # ralph clean
+│   ├── clean.rs      # ralph clean
+│   └── image.rs      # ralph image (Docker image management)
 ├── config.rs         # ralph.toml parsing
 ├── state.rs          # Loop state management
 ├── detection.rs      # Completion detection
-├── sandbox/          # Docker sandbox (not yet integrated)
+├── notifications.rs  # Notification hooks (webhook, desktop, sound)
+├── sandbox/          # Docker sandbox
+│   ├── mod.rs        # Sandbox runner
+│   ├── docker.rs     # Docker container management
+│   └── network.rs    # Network policy (allowlist)
 └── templates/        # Embedded template files
 ```
 

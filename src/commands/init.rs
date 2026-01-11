@@ -252,11 +252,9 @@ mod tests {
     fn test_init_files_not_empty() {
         let files = init_files();
         assert!(!files.is_empty());
-        assert!(
-            files
-                .iter()
-                .any(|f| f.path.as_path() == Path::new("ralph.toml"))
-        );
+        assert!(files
+            .iter()
+            .any(|f| f.path.as_path() == Path::new("ralph.toml")));
     }
 
     #[test]
@@ -292,11 +290,9 @@ mod tests {
         assert_eq!(written.borrow().len(), files.len());
 
         // .cursor/rules directory should have been created
-        assert!(
-            dirs_created
-                .borrow()
-                .contains(&PathBuf::from(".cursor/rules"))
-        );
+        assert!(dirs_created
+            .borrow()
+            .contains(&PathBuf::from(".cursor/rules")));
     }
 
     #[test]

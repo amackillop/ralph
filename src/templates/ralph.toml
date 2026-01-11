@@ -85,3 +85,18 @@ protected_branches = ["main", "master", "production"]
 [completion]
 # Default completion promise format
 promise_format = "<promise>{}</promise>"
+
+[validation]
+# Enable code validation after each iteration
+# Default: true
+enabled = true
+
+# Validation command to run
+# Can be a single command or space-separated command with arguments
+# Examples:
+#   - "nix flake check" (default, recommended for Nix projects)
+#   - "cargo check"
+#   - "cargo test"
+#   - "./validate.sh"
+# Default: "nix flake check"
+command = "nix flake check"
