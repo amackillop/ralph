@@ -1,0 +1,28 @@
+---
+description: How to write Cursor rules
+alwaysApply: false
+---
+Store rules in `.cursor/rules/*.mdc` files.
+
+Format:
+- Frontmatter: `description`, `globs` (optional), `alwaysApply` (boolean)
+- Content: Markdown with bullet points
+
+Writing style:
+- Use imperative mood
+- Be terse; omit unnecessary words
+- Avoid repetition
+- One instruction per bullet
+- Focus on actionable guidance, not explanations
+
+Example structure:
+```
+---
+description: Brief description
+globs: path/**/*.*
+alwaysApply: false
+---
+- Use X for Y
+- Prefer A over B
+- Avoid C
+```

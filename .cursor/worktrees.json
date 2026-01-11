@@ -1,0 +1,7 @@
+{
+    "setup-worktree": [
+        "eval \"$(nix print-dev-env .#agent | grep -v 'LINENO')\"",
+        "nix build --no-link",
+        "nix flake check"
+    ]
+}

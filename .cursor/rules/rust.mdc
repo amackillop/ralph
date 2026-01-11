@@ -1,0 +1,94 @@
+---
+description: Rust coding style and patterns
+globs: **/*.rs
+alwaysApply: false
+---
+## Side Effects & Testability
+
+- Abstract side effects (IO, network, time) as closure parameters
+- Keep core logic pure and easily testable
+- Inject real dependencies (clients, filesystem) at call sites
+- For tests, pass closures returning controlled values or mutating test state
+
+Example:
+```rust
+// Core logic takes closures for side effects
+fn process_items<F, G>(items: Vec<Item>, fetch: F, save: G) -> Result<()>
+where
+    F: Fn(&str) -> Result<Data>,
+    G: Fn(&Data) -> Result<()>,
+{
+    for item in items {
+        let data = fetch(&item.id)?;
+        save(&data)?;
+    }
+    Ok(())
+}
+
+// Production: inject real clients
+process_items(items, |id| client.fetch(id), |data| db.save(data))?;
+
+// Test: inject controlled behavior
+let call_count = Cell::new(0);
+process_items(items, |_| {
+    call_count.set(call_count.get() + 1);
+    Ok(test_data.clone())
+}, |_| Ok(()))?;
+assert_eq!(call_count.get(), 3);
+```
+
+## Error Handling
+
+- Use `anyhow::Result` for application-level error propagation
+- Use `thiserror` to model error domains requiring decision logic
+- Match on error variants when caller must handle cases differently
+
+Example:
+```rust
+#[derive(Debug, thiserror::Error)]
+pub enum FetchError {
+    #[error("not found: {0}")]
+    NotFound(String),
+    #[error("rate limited, retry after {retry_after_secs}s")]
+    RateLimited { retry_after_secs: u64 },
+    #[error("network error: {0}")]
+    Network(#[from] reqwest::Error),
+}
+
+// Caller decides behavior per variant
+match fetch_resource(id) {
+    Ok(data) => process(data),
+    Err(FetchError::NotFound(_)) => create_default(),
+    Err(FetchError::RateLimited { retry_after_secs }) => sleep_and_retry(retry_after_secs),
+    Err(e) => return Err(e.into()),
+}
+```
+
+## Iterators & Functional Style
+
+- Prefer iterator chains over manual loops
+- Use `.fold()` to accumulate into tuples or complex state
+- Return `impl Iterator` from functions to compose lazily
+- Use `.filter_map()` to filter and transform in one pass
+- Use `.scan()` for stateful iteration
+- Use Entry API for HashMap: `.entry().or_default()`
+
+## Parsing
+
+- Use `nom` for structured parsing with combinators
+- Create small, composable parser functions
+
+## Structs & Types
+
+- Use simple structs with derives: `#[derive(Debug, Clone, PartialEq, Eq)]`
+- Model domain concepts as structs even if small
+- Use struct update syntax: `Struct { field: new_val, ..existing }`
+
+## Testing
+
+- Test individual functions, not just public API
+- Use `debug_assert!` for internal invariants
+- Include benchmarks for performance-critical code
+
+## Documentation
+- Use `///` doc comments to explain algorithm/approach above functions

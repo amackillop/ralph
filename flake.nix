@@ -19,8 +19,15 @@
       let
         pkgs = nixpkgs.legacyPackages.${system};
 
-        # Use fenix for the Rust toolchain
-        toolchain = fenix.packages.${system}.stable.toolchain;
+        # Use fenix for the Rust toolchain (with llvm-tools for coverage)
+        toolchain = fenix.packages.${system}.stable.withComponents [
+          "cargo"
+          "clippy"
+          "rust-src"
+          "rustc"
+          "rustfmt"
+          "llvm-tools"
+        ];
 
         craneLib = (crane.mkLib pkgs).overrideToolchain toolchain;
 
@@ -65,39 +72,8 @@
           doCheck = false;
         });
 
-      in
-      {
-        checks = {
-          # Build the crate as part of `nix flake check`
-          inherit ralph;
-
-          # Run clippy
-          ralph-clippy = craneLib.cargoClippy (commonArgs // {
-            inherit cargoArtifacts;
-            cargoClippyExtraArgs = "--all-targets -- --deny warnings";
-          });
-
-          # Check formatting
-          ralph-fmt = craneLib.cargoFmt {
-            inherit src;
-          };
-
-          # Run tests
-          ralph-test = craneLib.cargoTest (commonArgs // {
-            inherit cargoArtifacts;
-          });
-        };
-
-        packages = {
-          default = ralph;
-          inherit ralph;
-        };
-
-        apps.default = flake-utils.lib.mkApp {
-          drv = ralph;
-        };
-
-        devShells.default = craneLib.devShell {
+        # Common devShell configuration factory
+        mkDevShell = { extraShellHook ? "" }: craneLib.devShell {
           # Inherit inputs from checks
           checks = self.checks.${system};
 
@@ -109,6 +85,7 @@
             cargo-edit
             cargo-audit
             cargo-outdated
+            cargo-llvm-cov
 
             # Build dependencies
             pkg-config
@@ -130,7 +107,6 @@
             libiconv
           ];
 
-          # Environment variables
           shellHook = ''
             echo "ralph development shell"
             echo "Rust: $(rustc --version)"
@@ -142,7 +118,71 @@
             echo "  cargo run      - Run the CLI"
             echo "  cargo watch    - Watch for changes"
             echo ""
+            ${extraShellHook}
           '';
+        };
+
+      in
+      {
+        checks = {
+          # Build the crate as part of `nix flake check`
+          inherit ralph;
+
+          # Run clippy
+          ralph-clippy = craneLib.cargoClippy (commonArgs // {
+            inherit cargoArtifacts;
+            cargoClippyExtraArgs = "--all-targets -- --deny warnings";
+          });
+
+          # Check formatting
+          ralph-fmt = craneLib.cargoFmt {
+            inherit src;
+          };
+
+          # Run tests
+          ralph-test = craneLib.cargoTest (commonArgs // {
+            inherit cargoArtifacts;
+          });
+
+          # Code coverage (fails if coverage drops below threshold)
+          ralph-coverage = craneLib.cargoLlvmCov (commonArgs // {
+            inherit cargoArtifacts;
+            cargoLlvmCovExtraArgs = "--fail-under-lines 70 --html --output-dir $out";
+          });
+        };
+
+        packages = {
+          default = ralph;
+          inherit ralph;
+        };
+
+        apps.default = flake-utils.lib.mkApp {
+          drv = ralph;
+        };
+
+        devShells = {
+          # Default shell for human development
+          default = mkDevShell { };
+
+          # Agent shell for Ralph worktrees (configures signing identity)
+          agent = mkDevShell {
+            extraShellHook = ''
+              # Configure Ralph's signing identity for automated commits
+              RALPH_SIGNING_KEY="$HOME/.ssh/ralph_signing"
+              if [ -f "$RALPH_SIGNING_KEY" ]; then
+                git config --local user.name "Ralph Wiggum"
+                git config --local user.email "ralph@localhost"
+                git config --local gpg.format ssh
+                git config --local user.signingkey "$RALPH_SIGNING_KEY"
+                git config --local commit.gpgsign true
+                echo "🤖 Ralph signing identity configured"
+              else
+                echo "⚠️  Ralph signing key not found at $RALPH_SIGNING_KEY"
+                echo "   Generate with: ssh-keygen -t ed25519 -f $RALPH_SIGNING_KEY -N \"\" -C \"ralph-agent\""
+              fi
+              echo ""
+            '';
+          };
         };
       });
 }
