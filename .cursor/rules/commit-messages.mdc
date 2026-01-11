@@ -1,0 +1,19 @@
+---
+alwaysApply: false
+description: How to write good commit messages
+---
+ Follow the seven rules:
+
+- Separate subject from body with blank line
+- Limit subject to 50 characters (72 hard limit)
+- Capitalize subject line
+- No period at end of subject
+- Use imperative mood in subject (e.g., "Fix bug" not "Fixed bug" or "Fixes bug")
+- Wrap body at 72 characters
+- Body explains what and why, not how
+- The diff explains how
+
+Subject test: "If applied, this commit will [subject]" must make sense.
+
+Like how a comment provides important context for a line of code, the commit message
+should provide important context for the change being committed.

@@ -1,0 +1,196 @@
+# ============================================================================
+# Ralph Configuration
+# ============================================================================
+# All values shown are the defaults unless marked otherwise.
+# You only need to include settings you want to change from defaults.
+
+# ============================================================================
+# Agent Configuration
+# ============================================================================
+# Selects and configures the AI agent CLI to use for iterations.
+
+[agent]
+# Which agent provider to use: "cursor" or "claude"
+# Default: "cursor"
+provider = "cursor"
+
+# ----------------------------------------------------------------------------
+# Cursor CLI Configuration
+# https://cursor.com/docs/cli/overview
+# ----------------------------------------------------------------------------
+[agent.cursor]
+# Path to the Cursor agent CLI executable
+# - "agent"         : Standard Cursor CLI installation (default)
+# - "cursor-agent"  : NixOS package name
+# - "/path/to/agent": Custom absolute path
+path = "cursor-agent"
+
+# Model to use (optional)
+# If not set, uses Cursor's default model
+# Examples: "claude-sonnet-4-20250514", "gpt-4o", etc.
+model = "opus-4.5-thinking"
+
+# Output format for non-interactive (-p) mode
+# Options: "text", "json", "stream-json"
+# Default: "text"
+output_format = "text"
+
+# ----------------------------------------------------------------------------
+# Claude Code CLI Configuration
+# https://docs.anthropic.com/en/docs/claude-code
+# ----------------------------------------------------------------------------
+[agent.claude]
+# Path to the Claude CLI executable
+# - "claude"         : Standard installation via npm (default)
+# - "/path/to/claude": Custom absolute path
+path = "claude"
+
+# Model to use (optional)
+# If not set, uses Claude's default
+# Examples: "opus", "sonnet"
+# model = "opus"
+
+# Skip permission prompts (required for autonomous operation)
+# MUST be true for Ralph loops to work unattended
+# Default: true
+skip_permissions = true
+
+# Output format
+# Options: "text", "json", "stream-json"
+# Default: "stream-json"
+output_format = "stream-json"
+
+# Enable verbose output from Claude CLI
+# Default: false
+verbose = false
+
+
+# ============================================================================
+# Sandbox Configuration (Docker)
+# ============================================================================
+# Runs the AI agent inside a Docker container for isolation.
+# Philosophy: "It's not if it gets popped, it's when. What's the blast radius?"
+
+[sandbox]
+# Enable/disable Docker sandboxing
+# Set to false for trusted environments or when Docker isn't available
+# Default: true
+enabled = false
+
+# Docker image to use for the sandbox
+# Build with: docker build -t ralph:latest .
+# Default: "ralph:latest"
+image = "ralph:latest"
+
+# Additional volume mounts
+# The workspace is always mounted at /workspace (read-write)
+# Credentials (~/.ssh, ~/.gitconfig) are mounted read-only by default
+[[sandbox.mounts]]
+host = "~/.npm"           # Host path (~ is expanded)
+container = "/root/.npm"  # Container path
+readonly = false          # Read-only mount (default: true)
+
+[[sandbox.mounts]]
+host = "~/.cargo/registry"
+container = "/root/.cargo/registry"
+readonly = true
+
+# ----------------------------------------------------------------------------
+# Network Configuration
+# ----------------------------------------------------------------------------
+[sandbox.network]
+# Network policy for the sandbox container
+# Options:
+#   - "allow-all"  : Full network access (default, easiest to start)
+#   - "allowlist"  : Only allow specific domains (see 'allowed' list)
+#   - "deny"       : No network access at all
+# Default: "allow-all"
+policy = "allow-all"
+
+# Allowed domains when policy = "allowlist"
+# Only these domains can be accessed from the sandbox
+allowed = [
+    # Code hosting
+    "github.com",
+    "gitlab.com",
+    "bitbucket.org",
+
+    # Package registries
+    "registry.npmjs.org",
+    "pypi.org",
+    "files.pythonhosted.org",
+    "crates.io",
+    "static.crates.io",
+    "rubygems.org",
+
+    # AI APIs (if agent needs to call them)
+    "api.anthropic.com",
+    "api.openai.com",
+
+    # Common CDNs
+    "cdn.jsdelivr.net",
+    "unpkg.com",
+]
+
+# Custom DNS servers for the container
+# Default: ["8.8.8.8", "1.1.1.1"]
+dns = ["8.8.8.8", "1.1.1.1"]
+
+# ----------------------------------------------------------------------------
+# Resource Limits
+# ----------------------------------------------------------------------------
+[sandbox.resources]
+# Memory limit (Docker format)
+# Examples: "4g", "8g", "16g"
+# Default: "8g"
+memory = "8g"
+
+# CPU limit (number of CPUs)
+# Examples: "2", "4", "8"
+# Default: "4"
+cpus = "4"
+
+# Timeout per iteration in minutes
+# The container is killed if an iteration exceeds this
+# Default: 60
+timeout_minutes = 60
+
+
+# ============================================================================
+# Git Configuration
+# ============================================================================
+# Controls how Ralph interacts with Git after each iteration.
+
+[git]
+# Automatically push after each successful iteration
+# Set to false for local development or when working offline
+# Default: true
+auto_push = true
+
+# Protected branches that Ralph cannot force-push to
+# Ralph will refuse to run if on a protected branch
+# Default: ["main", "master", "production"]
+protected_branches = [
+    "main",
+    "master",
+    "production",
+    "release",
+    "stable",
+]
+
+
+# ============================================================================
+# Completion Detection
+# ============================================================================
+# Controls how Ralph detects when the task is complete.
+
+[completion]
+# Format for the completion promise tag
+# The {} is replaced with the promise text from --completion-promise
+# When the AI outputs this tag, Ralph stops the loop
+# Default: "<promise>{}</promise>"
+#
+# Example: With promise_format = "<promise>{}</promise>" and
+#          --completion-promise "All tests passing"
+#          Ralph looks for: <promise>All tests passing</promise>
+promise_format = "<promise>{}</promise>"

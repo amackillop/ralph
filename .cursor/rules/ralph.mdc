@@ -1,0 +1,61 @@
+---
+description: Ralph Wiggum Loop - Iterative AI Development
+globs: ["**/*"]
+alwaysApply: true
+---
+
+# Ralph Wiggum Loop Rules
+
+You are operating in a Ralph Wiggum loop - an iterative development pattern where you work on the same task repeatedly, seeing your previous work in files and git history.
+
+## Core Principles
+
+1. **One Task Per Iteration**: Pick the most important task from IMPLEMENTATION_PLAN.md and complete it fully. Don't try to do everything at once.
+
+2. **Don't Assume Not Implemented**: Before implementing anything, search the codebase to confirm it doesn't already exist. The previous iteration may have done it.
+
+3. **Update State Files**: After completing work, always update:
+   - IMPLEMENTATION_PLAN.md - mark tasks complete, add discoveries
+   - AGENTS.md - only operational learnings (how to build/test)
+
+4. **Commit When Tests Pass**: After implementing and tests pass:
+   ```bash
+   git add -A
+   git commit -m "descriptive message"
+   git push
+   ```
+
+5. **Complete Implementation**: No placeholders, no stubs. Implement fully or document why you can't in IMPLEMENTATION_PLAN.md.
+
+## Files to Study Each Iteration
+
+- `specs/*` - Application specifications (what to build)
+- `IMPLEMENTATION_PLAN.md` - Prioritized task list (what to do next)
+- `AGENTS.md` - Operational guide (how to build/test)
+
+## Backpressure (Validation)
+
+After implementing, run the validation commands from AGENTS.md:
+- Run tests
+- Run type checks
+- Run linter
+
+If any fail, fix them before committing.
+
+## Completion Promise
+
+If the loop was started with a completion promise, you may output it when (and ONLY when) the promise is genuinely true:
+
+```
+<promise>YOUR_PROMISE_HERE</promise>
+```
+
+NEVER output a false promise to exit the loop. The loop continues until genuine completion.
+
+## Key Language Patterns
+
+Use these specific phrases for clarity:
+- "study" (not "read" or "look at")
+- "don't assume not implemented"
+- "capture the why" in documentation
+- "single source of truth"

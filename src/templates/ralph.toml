@@ -1,0 +1,87 @@
+# Ralph Configuration
+# Supports multiple AI agent CLIs: Cursor, Claude
+
+[agent]
+# Which agent to use: "cursor" or "claude"
+provider = "cursor"
+
+# Cursor CLI configuration
+# See: https://cursor.com/docs/cli/overview
+[agent.cursor]
+# Path to the Cursor agent CLI
+# - Default: "agent" (standard Cursor CLI installation)
+# - NixOS: "cursor-agent"
+# - Custom: "/path/to/agent"
+path = "agent"
+
+# Model to use (optional, uses Cursor's default if not set)
+# model = "claude-sonnet-4-20250514"
+
+# Output format for non-interactive mode
+output_format = "text"
+
+# Claude Code CLI configuration
+# See: https://docs.anthropic.com/en/docs/claude-code
+[agent.claude]
+# Path to the Claude CLI
+path = "claude"
+
+# Model to use (optional)
+# model = "opus"
+
+# Skip permission prompts (required for autonomous operation)
+skip_permissions = true
+
+# Output format
+output_format = "stream-json"
+
+# Verbose output
+verbose = false
+
+[sandbox]
+# Enable Docker sandboxing for isolation
+enabled = true
+
+# Docker image to use (build with: docker build -t ralph:latest .)
+image = "ralph:latest"
+
+# Additional volume mounts (read-only by default)
+# mounts = [
+#     { host = "~/.npm", container = "/root/.npm", readonly = false },
+# ]
+
+[sandbox.network]
+# Network policy: "allow-all", "allowlist", "deny"
+# Default: allow-all for ease of use; tighten per-project as needed
+policy = "allow-all"
+
+# Allowed domains when policy = "allowlist"
+# allowed = [
+#     "github.com",
+#     "gitlab.com",
+#     "registry.npmjs.org",
+#     "pypi.org",
+#     "crates.io",
+#     "api.anthropic.com",
+#     "api.openai.com",
+# ]
+
+# Custom DNS servers
+dns = ["8.8.8.8", "1.1.1.1"]
+
+[sandbox.resources]
+# Resource limits
+memory = "8g"
+cpus = "4"
+timeout_minutes = 60
+
+[git]
+# Auto-push after each iteration
+auto_push = true
+
+# Protected branches (ralph cannot force-push to these)
+protected_branches = ["main", "master", "production"]
+
+[completion]
+# Default completion promise format
+promise_format = "<promise>{}</promise>"
