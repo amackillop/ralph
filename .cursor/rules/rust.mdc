@@ -37,6 +37,44 @@ process_items(items, |_| {
 assert_eq!(call_count.get(), 3);
 ```
 
+## Output Formatting
+
+- Separate formatting from printing: format functions return `String`
+- Use `std::fmt::Write` to build strings, not `println!`
+- Print only at the top-level `run()` function
+- This makes output testable without capturing stdout
+
+Example:
+```rust
+use std::fmt::Write;
+
+// Pure: returns a string, easily testable
+pub fn format_result(items: &[Item]) -> String {
+    let mut out = String::new();
+    writeln!(&mut out, "Found {} items:", items.len()).unwrap();
+    for item in items {
+        writeln!(&mut out, "  - {}", item.name).unwrap();
+    }
+    out
+}
+
+// Entry point: only place that does IO
+pub async fn run() -> Result<()> {
+    let items = load_items()?;
+    print!("{}", format_result(&items));  // IO here only
+    Ok(())
+}
+
+// Test: verify formatting without IO
+#[test]
+fn test_format_result() {
+    let items = vec![Item { name: "foo" }, Item { name: "bar" }];
+    let output = format_result(&items);
+    assert!(output.contains("2 items"));
+    assert!(output.contains("foo"));
+}
+```
+
 ## Error Handling
 
 - Use `anyhow::Result` for application-level error propagation
@@ -91,4 +129,5 @@ match fetch_resource(id) {
 - Include benchmarks for performance-critical code
 
 ## Documentation
+
 - Use `///` doc comments to explain algorithm/approach above functions

@@ -106,18 +106,22 @@ mod tests {
     use super::*;
     use tempfile::tempdir;
 
-    #[test]
-    fn test_state_roundtrip() {
-        let dir = tempdir().unwrap();
-        let state = RalphState {
-            active: true,
-            mode: Mode::Build,
+    fn make_state(active: bool, mode: Mode) -> RalphState {
+        RalphState {
+            active,
+            mode,
             iteration: 5,
             max_iterations: Some(20),
             completion_promise: Some("DONE".to_string()),
             started_at: Utc::now(),
             last_iteration_at: Some(Utc::now()),
-        };
+        }
+    }
+
+    #[test]
+    fn test_state_roundtrip() {
+        let dir = tempdir().unwrap();
+        let state = make_state(true, Mode::Build);
 
         state.save(dir.path()).unwrap();
         let loaded = RalphState::load(dir.path()).unwrap().unwrap();
@@ -134,5 +138,102 @@ mod tests {
         let dir = tempdir().unwrap();
         let result = RalphState::load(dir.path()).unwrap();
         assert!(result.is_none());
+    }
+
+    #[test]
+    fn test_load_or_create_with_active_state() {
+        let dir = tempdir().unwrap();
+        let state = make_state(true, Mode::Build);
+        state.save(dir.path()).unwrap();
+
+        // Should return existing active state, ignoring requested mode
+        let loaded = RalphState::load_or_create(dir.path(), Mode::Plan).unwrap();
+        assert!(loaded.active);
+        assert_eq!(loaded.mode, Mode::Build); // Original mode preserved
+        assert_eq!(loaded.iteration, 5);
+    }
+
+    #[test]
+    fn test_load_or_create_with_inactive_state() {
+        let dir = tempdir().unwrap();
+        let state = make_state(false, Mode::Build);
+        state.save(dir.path()).unwrap();
+
+        // Should create new state with requested mode
+        let loaded = RalphState::load_or_create(dir.path(), Mode::Plan).unwrap();
+        assert!(!loaded.active);
+        assert_eq!(loaded.mode, Mode::Plan);
+        assert_eq!(loaded.iteration, 1); // Default iteration
+    }
+
+    #[test]
+    fn test_load_or_create_no_state() {
+        let dir = tempdir().unwrap();
+
+        let loaded = RalphState::load_or_create(dir.path(), Mode::Plan).unwrap();
+        assert!(!loaded.active);
+        assert_eq!(loaded.mode, Mode::Plan);
+        assert_eq!(loaded.iteration, 1);
+    }
+
+    #[test]
+    fn test_delete_existing() {
+        let dir = tempdir().unwrap();
+        let state = make_state(true, Mode::Build);
+        state.save(dir.path()).unwrap();
+
+        let deleted = RalphState::delete(dir.path()).unwrap();
+        assert!(deleted);
+
+        // Verify it's gone
+        let loaded = RalphState::load(dir.path()).unwrap();
+        assert!(loaded.is_none());
+    }
+
+    #[test]
+    fn test_delete_nonexistent() {
+        let dir = tempdir().unwrap();
+        let deleted = RalphState::delete(dir.path()).unwrap();
+        assert!(!deleted);
+    }
+
+    #[test]
+    fn test_default_state() {
+        let state = RalphState::default();
+        assert!(!state.active);
+        assert_eq!(state.mode, Mode::Build);
+        assert_eq!(state.iteration, 1);
+        assert!(state.max_iterations.is_none());
+        assert!(state.completion_promise.is_none());
+        assert!(state.last_iteration_at.is_none());
+    }
+
+    #[test]
+    fn test_mode_serialization() {
+        let state = RalphState {
+            mode: Mode::Plan,
+            ..Default::default()
+        };
+        let serialized = toml::to_string(&state).unwrap();
+        assert!(serialized.contains("mode = \"plan\""));
+
+        let state = RalphState {
+            mode: Mode::Build,
+            ..Default::default()
+        };
+        let serialized = toml::to_string(&state).unwrap();
+        assert!(serialized.contains("mode = \"build\""));
+    }
+
+    #[test]
+    fn test_save_creates_directory() {
+        let dir = tempdir().unwrap();
+        // Directory doesn't have .cursor yet
+        let state = make_state(true, Mode::Build);
+        state.save(dir.path()).unwrap();
+
+        // Should have created .cursor directory
+        assert!(dir.path().join(".cursor").exists());
+        assert!(dir.path().join(".cursor/ralph-state.toml").exists());
     }
 }

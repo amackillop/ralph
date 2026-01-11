@@ -34,22 +34,29 @@ You are operating in a Ralph Wiggum loop - an iterative development pattern wher
 - `AGENTS.md` - Operational guide (how to build/test)
 
 ## Testing Requirements
+
 All code changes must include tests:
 - Every new function must have at least one test
 - Bug fixes must include a regression test
-- Coverage must not drop below 70% (enforced by `nix flake check`)
-- Run `cargo llvm-cov` to verify coverage before committing
+- Coverage must not drop below 85%
 
 No untested code will be accepted. If you cannot write a test, document why in IMPLEMENTATION_PLAN.md and flag for human review.
 
 ## Backpressure (Validation)
 
-After implementing, run the validation commands from AGENTS.md:
-- Run tests
-- Run type checks
-- Run linter
+Before committing, run ALL validation commands:
 
-If any fail, fix them before committing.
+```bash
+# Format, lint, test
+cargo fmt
+cargo clippy --all-targets -- -D warnings
+cargo test
+
+# Coverage check (required before completing any task)
+nix run .#coverage
+```
+
+If any command fails, fix the issue before committing. Do not skip coverage.
 
 ## Completion Promise
 

@@ -144,11 +144,8 @@
             inherit cargoArtifacts;
           });
 
-          # Code coverage (fails if coverage drops below threshold)
-          ralph-coverage = craneLib.cargoLlvmCov (commonArgs // {
-            inherit cargoArtifacts;
-            cargoLlvmCovExtraArgs = "--fail-under-lines 70 --html --output-dir $out";
-          });
+          # Coverage is checked via `cargo llvm-cov` (see AGENTS.md)
+          # Not in nix checks due to rebuild overhead
         };
 
         packages = {
@@ -156,8 +153,31 @@
           inherit ralph;
         };
 
-        apps.default = flake-utils.lib.mkApp {
-          drv = ralph;
+        apps = {
+          default = flake-utils.lib.mkApp {
+            drv = ralph;
+          };
+
+          # Coverage check app - run with: nix run .#coverage
+          coverage = flake-utils.lib.mkApp {
+            drv = pkgs.writeShellApplication {
+              name = "ralph-coverage";
+              runtimeInputs = [
+                toolchain
+                pkgs.cargo-llvm-cov
+                pkgs.pkg-config
+                pkgs.openssl
+              ] ++ pkgs.lib.optionals pkgs.stdenv.isDarwin [
+                pkgs.darwin.apple_sdk.frameworks.Security
+                pkgs.darwin.apple_sdk.frameworks.SystemConfiguration
+                pkgs.libiconv
+              ];
+              text = ''
+                echo "Running coverage check (85% threshold)..."
+                cargo llvm-cov --release --fail-under-lines 85 --ignore-filename-regex '(main\.rs$|/rustlib/)' "$@"
+              '';
+            };
+          };
         };
 
         devShells = {

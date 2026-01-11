@@ -1,7 +1,12 @@
+//! Main Ralph loop command.
+//!
+//! This module runs the iterative AI development loop. Core logic
+//! is separated into testable functions where possible.
+
 use anyhow::{bail, Context, Result};
 use clap::ValueEnum;
 use colored::Colorize;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use tracing::{debug, info, warn};
 
 use crate::agent::{AgentProvider, ClaudeProvider, CursorProvider, Provider};
@@ -24,6 +29,82 @@ impl From<LoopMode> for Mode {
     }
 }
 
+/// Determine the prompt file path based on mode and custom override
+pub fn determine_prompt_file(cwd: &Path, mode: LoopMode, custom_prompt: Option<&str>) -> PathBuf {
+    match custom_prompt {
+        Some(p) => PathBuf::from(p),
+        None => match mode {
+            LoopMode::Plan => cwd.join("PROMPT_plan.md"),
+            LoopMode::Build => cwd.join("PROMPT_build.md"),
+        },
+    }
+}
+
+/// Prepare state with CLI options
+pub fn prepare_state(
+    mut state: RalphState,
+    max_iterations: u32,
+    completion_promise: Option<String>,
+) -> RalphState {
+    state.max_iterations = if max_iterations > 0 {
+        Some(max_iterations)
+    } else {
+        None
+    };
+    state.completion_promise = completion_promise;
+    state.active = true;
+    state
+}
+
+/// Check if max iterations has been reached
+pub fn is_max_iterations_reached(state: &RalphState) -> bool {
+    state
+        .max_iterations
+        .map(|max| state.iteration > max)
+        .unwrap_or(false)
+}
+
+/// Outcome of a single loop iteration
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[allow(dead_code)]
+pub enum IterationOutcome {
+    Continue,
+    MaxIterationsReached,
+    CompletionDetected,
+}
+
+/// Format banner information for display
+#[derive(Debug, Clone)]
+pub struct BannerInfo {
+    pub provider: String,
+    pub mode: String,
+    pub prompt_file: String,
+    pub iteration: u32,
+    pub max_iterations: Option<u32>,
+    pub promise: Option<String>,
+    pub sandbox_enabled: bool,
+}
+
+impl BannerInfo {
+    pub fn new(
+        state: &RalphState,
+        prompt_file: &Path,
+        no_sandbox: bool,
+        config: &Config,
+        provider: Provider,
+    ) -> Self {
+        Self {
+            provider: provider.to_string(),
+            mode: format!("{:?}", state.mode),
+            prompt_file: prompt_file.display().to_string(),
+            iteration: state.iteration,
+            max_iterations: state.max_iterations,
+            promise: state.completion_promise.clone(),
+            sandbox_enabled: !no_sandbox && config.sandbox.enabled,
+        }
+    }
+}
+
 pub async fn run(
     mode: LoopMode,
     max_iterations: u32,
@@ -37,39 +118,26 @@ pub async fn run(
     let config = Config::load(&cwd).context("Failed to load ralph.toml")?;
 
     // Determine prompt file
-    let prompt_file = match custom_prompt {
-        Some(p) => PathBuf::from(p),
-        None => match mode {
-            LoopMode::Plan => cwd.join("PROMPT_plan.md"),
-            LoopMode::Build => cwd.join("PROMPT_build.md"),
-        },
-    };
+    let prompt_file = determine_prompt_file(&cwd, mode, custom_prompt.as_deref());
 
     if !prompt_file.exists() {
         bail!(
-            "Prompt file not found: {}\nRun 'cursor-ralph init' to create default files.",
+            "Prompt file not found: {}\nRun 'ralph init' to create default files.",
             prompt_file.display()
         );
     }
 
     // Load or create state
-    let mut state = RalphState::load_or_create(&cwd, mode.into())?;
-
-    // Update state with CLI options
-    state.max_iterations = if max_iterations > 0 {
-        Some(max_iterations)
-    } else {
-        None
-    };
-    state.completion_promise = completion_promise.clone();
-    state.active = true;
+    let state = RalphState::load_or_create(&cwd, mode.into())?;
+    let mut state = prepare_state(state, max_iterations, completion_promise.clone());
     state.save(&cwd)?;
 
     // Get the configured agent provider
     let provider = config.agent.get_provider()?;
 
     // Print startup banner
-    print_banner(&state, &prompt_file, no_sandbox, &config, provider);
+    let banner = BannerInfo::new(&state, &prompt_file, no_sandbox, &config, provider);
+    print!("{}", format_banner(&banner));
 
     // Create the agent provider
     let agent: Box<dyn AgentProvider> = match provider {
@@ -80,28 +148,24 @@ pub async fn run(
     let detector = CompletionDetector::new(completion_promise.as_deref());
 
     // Warn about sandbox (not yet implemented for multi-provider)
-    if !no_sandbox && config.sandbox.enabled {
+    if banner.sandbox_enabled {
         warn!("Docker sandbox is not yet implemented for the provider system. Running without sandbox.");
     }
 
     // Main loop
     loop {
         // Check max iterations
-        if let Some(max) = state.max_iterations {
-            if state.iteration > max {
-                println!("\n{} Max iterations ({}) reached.", "🛑".red(), max);
-                state.active = false;
-                state.save(&cwd)?;
-                break;
-            }
+        if is_max_iterations_reached(&state) {
+            println!(
+                "{}",
+                format_max_iterations_reached(state.max_iterations.unwrap())
+            );
+            state.active = false;
+            state.save(&cwd)?;
+            break;
         }
 
-        println!(
-            "\n{} Iteration {} {}",
-            "━".repeat(20).dimmed(),
-            state.iteration.to_string().cyan().bold(),
-            "━".repeat(20).dimmed()
-        );
+        println!("{}", format_iteration_header(state.iteration));
 
         // Read prompt
         let prompt = std::fs::read_to_string(&prompt_file)
@@ -122,12 +186,8 @@ pub async fn run(
         // Check for completion
         if detector.is_complete(&output, &cwd)? {
             println!(
-                "\n{} Completion detected: {}",
-                "✅".green(),
-                state
-                    .completion_promise
-                    .as_deref()
-                    .unwrap_or("task complete")
+                "{}",
+                format_completion_detected(state.completion_promise.as_deref())
             );
             state.active = false;
             state.save(&cwd)?;
@@ -146,52 +206,102 @@ pub async fn run(
         state.save(&cwd)?;
     }
 
-    println!("\n{} Ralph loop finished.", "🎉".green());
-    println!("  Total iterations: {}", state.iteration.to_string().cyan());
+    print!("{}", format_loop_finished(state.iteration));
 
     Ok(())
 }
 
-fn print_banner(
-    state: &RalphState,
-    prompt_file: &std::path::Path,
-    no_sandbox: bool,
-    config: &Config,
-    provider: Provider,
-) {
-    println!("\n{}", "━".repeat(50).dimmed());
-    println!("{}", "   🔄 Ralph Loop Starting".yellow().bold());
-    println!("{}", "━".repeat(50).dimmed());
+/// Format banner for display (colored output)
+pub fn format_banner(info: &BannerInfo) -> String {
+    use std::fmt::Write;
+    let mut out = String::new();
 
-    println!("  Agent:      {}", provider.to_string().cyan().bold());
-    println!("  Mode:       {}", format!("{:?}", state.mode).cyan());
-    println!("  Prompt:     {}", prompt_file.display().to_string().cyan());
-    println!("  Iteration:  {}", state.iteration.to_string().cyan());
-    println!(
+    writeln!(&mut out, "\n{}", "━".repeat(50).dimmed()).unwrap();
+    writeln!(&mut out, "{}", "   🔄 Ralph Loop Starting".yellow().bold()).unwrap();
+    writeln!(&mut out, "{}", "━".repeat(50).dimmed()).unwrap();
+
+    writeln!(&mut out, "  Agent:      {}", info.provider.cyan().bold()).unwrap();
+    writeln!(&mut out, "  Mode:       {}", info.mode.cyan()).unwrap();
+    writeln!(&mut out, "  Prompt:     {}", info.prompt_file.cyan()).unwrap();
+    writeln!(
+        &mut out,
+        "  Iteration:  {}",
+        info.iteration.to_string().cyan()
+    )
+    .unwrap();
+    writeln!(
+        &mut out,
         "  Max:        {}",
-        state
-            .max_iterations
+        info.max_iterations
             .map(|n| n.to_string())
             .unwrap_or_else(|| "unlimited".to_string())
             .cyan()
-    );
-    println!(
+    )
+    .unwrap();
+    writeln!(
+        &mut out,
         "  Promise:    {}",
-        state.completion_promise.as_deref().unwrap_or("none").cyan()
-    );
+        info.promise.as_deref().unwrap_or("none").cyan()
+    )
+    .unwrap();
 
-    let sandbox_status = if no_sandbox || !config.sandbox.enabled {
-        "disabled".red()
-    } else {
+    let sandbox_status = if info.sandbox_enabled {
         "enabled".green()
+    } else {
+        "disabled".red()
     };
-    println!("  Sandbox:    {}", sandbox_status);
+    writeln!(&mut out, "  Sandbox:    {}", sandbox_status).unwrap();
 
-    println!("{}", "━".repeat(50).dimmed());
-    println!("\n  {} to stop\n", "Ctrl+C or 'ralph cancel'".dimmed());
+    writeln!(&mut out, "{}", "━".repeat(50).dimmed()).unwrap();
+    writeln!(
+        &mut out,
+        "\n  {} to stop\n",
+        "Ctrl+C or 'ralph cancel'".dimmed()
+    )
+    .unwrap();
+
+    out
 }
 
-async fn git_push(cwd: &PathBuf) -> Result<()> {
+/// Format iteration header
+pub fn format_iteration_header(iteration: u32) -> String {
+    format!(
+        "\n{} Iteration {} {}",
+        "━".repeat(20).dimmed(),
+        iteration.to_string().cyan().bold(),
+        "━".repeat(20).dimmed()
+    )
+}
+
+/// Format max iterations reached message
+pub fn format_max_iterations_reached(max: u32) -> String {
+    format!("\n{} Max iterations ({}) reached.", "🛑".red(), max)
+}
+
+/// Format completion detected message
+pub fn format_completion_detected(promise: Option<&str>) -> String {
+    format!(
+        "\n{} Completion detected: {}",
+        "✅".green(),
+        promise.unwrap_or("task complete")
+    )
+}
+
+/// Format loop finished message
+pub fn format_loop_finished(total_iterations: u32) -> String {
+    use std::fmt::Write;
+    let mut out = String::new();
+    writeln!(&mut out, "\n{} Ralph loop finished.", "🎉".green()).unwrap();
+    writeln!(
+        &mut out,
+        "  Total iterations: {}",
+        total_iterations.to_string().cyan()
+    )
+    .unwrap();
+    out
+}
+
+async fn git_push(cwd: &Path) -> Result<()> {
     debug!("Pushing to git...");
 
     let output = tokio::process::Command::new("git")
@@ -216,7 +326,7 @@ async fn git_push(cwd: &PathBuf) -> Result<()> {
     Ok(())
 }
 
-async fn get_current_branch(cwd: &PathBuf) -> Result<String> {
+async fn get_current_branch(cwd: &Path) -> Result<String> {
     let output = tokio::process::Command::new("git")
         .current_dir(cwd)
         .args(["branch", "--show-current"])
@@ -225,4 +335,209 @@ async fn get_current_branch(cwd: &PathBuf) -> Result<String> {
         .context("Failed to get current branch")?;
 
     Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use chrono::Utc;
+
+    fn make_state(iteration: u32, max: Option<u32>) -> RalphState {
+        RalphState {
+            active: false,
+            mode: Mode::Build,
+            iteration,
+            max_iterations: max,
+            completion_promise: None,
+            started_at: Utc::now(),
+            last_iteration_at: None,
+        }
+    }
+
+    #[test]
+    fn test_loop_mode_conversion() {
+        assert_eq!(Mode::from(LoopMode::Plan), Mode::Plan);
+        assert_eq!(Mode::from(LoopMode::Build), Mode::Build);
+    }
+
+    #[test]
+    fn test_determine_prompt_file_default_plan() {
+        let cwd = PathBuf::from("/project");
+        let path = determine_prompt_file(&cwd, LoopMode::Plan, None);
+        assert_eq!(path, PathBuf::from("/project/PROMPT_plan.md"));
+    }
+
+    #[test]
+    fn test_determine_prompt_file_default_build() {
+        let cwd = PathBuf::from("/project");
+        let path = determine_prompt_file(&cwd, LoopMode::Build, None);
+        assert_eq!(path, PathBuf::from("/project/PROMPT_build.md"));
+    }
+
+    #[test]
+    fn test_determine_prompt_file_custom() {
+        let cwd = PathBuf::from("/project");
+        let path = determine_prompt_file(&cwd, LoopMode::Build, Some("/custom/prompt.md"));
+        assert_eq!(path, PathBuf::from("/custom/prompt.md"));
+    }
+
+    #[test]
+    fn test_prepare_state_with_max() {
+        let state = make_state(1, None);
+        let prepared = prepare_state(state, 10, Some("DONE".to_string()));
+
+        assert!(prepared.active);
+        assert_eq!(prepared.max_iterations, Some(10));
+        assert_eq!(prepared.completion_promise, Some("DONE".to_string()));
+    }
+
+    #[test]
+    fn test_prepare_state_unlimited() {
+        let state = make_state(1, Some(5));
+        let prepared = prepare_state(state, 0, None);
+
+        assert!(prepared.active);
+        assert_eq!(prepared.max_iterations, None);
+        assert_eq!(prepared.completion_promise, None);
+    }
+
+    #[test]
+    fn test_is_max_iterations_reached_under() {
+        let state = make_state(3, Some(10));
+        assert!(!is_max_iterations_reached(&state));
+    }
+
+    #[test]
+    fn test_is_max_iterations_reached_at() {
+        let state = make_state(10, Some(10));
+        assert!(!is_max_iterations_reached(&state));
+    }
+
+    #[test]
+    fn test_is_max_iterations_reached_over() {
+        let state = make_state(11, Some(10));
+        assert!(is_max_iterations_reached(&state));
+    }
+
+    #[test]
+    fn test_is_max_iterations_reached_unlimited() {
+        let state = make_state(1000, None);
+        assert!(!is_max_iterations_reached(&state));
+    }
+
+    #[test]
+    fn test_banner_info_creation() {
+        let state = RalphState {
+            active: true,
+            mode: Mode::Plan,
+            iteration: 5,
+            max_iterations: Some(20),
+            completion_promise: Some("COMPLETE".to_string()),
+            started_at: Utc::now(),
+            last_iteration_at: None,
+        };
+        let config = Config::default();
+        let prompt = PathBuf::from("/project/PROMPT_plan.md");
+
+        let banner = BannerInfo::new(&state, &prompt, false, &config, Provider::Cursor);
+
+        assert_eq!(banner.provider, "cursor");
+        assert_eq!(banner.mode, "Plan");
+        assert_eq!(banner.iteration, 5);
+        assert_eq!(banner.max_iterations, Some(20));
+        assert_eq!(banner.promise, Some("COMPLETE".to_string()));
+    }
+
+    #[test]
+    fn test_banner_info_sandbox_disabled_by_flag() {
+        let state = RalphState::default();
+        let mut config = Config::default();
+        config.sandbox.enabled = true;
+        let prompt = PathBuf::from("/project/PROMPT.md");
+
+        let banner = BannerInfo::new(&state, &prompt, true, &config, Provider::Cursor);
+        assert!(!banner.sandbox_enabled);
+    }
+
+    #[test]
+    fn test_banner_info_sandbox_disabled_by_config() {
+        let state = RalphState::default();
+        let mut config = Config::default();
+        config.sandbox.enabled = false;
+        let prompt = PathBuf::from("/project/PROMPT.md");
+
+        let banner = BannerInfo::new(&state, &prompt, false, &config, Provider::Cursor);
+        assert!(!banner.sandbox_enabled);
+    }
+
+    #[test]
+    fn test_format_banner() {
+        let banner = BannerInfo {
+            provider: "cursor".to_string(),
+            mode: "Build".to_string(),
+            prompt_file: "/project/PROMPT.md".to_string(),
+            iteration: 3,
+            max_iterations: Some(10),
+            promise: Some("DONE".to_string()),
+            sandbox_enabled: true,
+        };
+
+        let output = format_banner(&banner);
+        assert!(output.contains("Ralph Loop Starting"));
+        assert!(output.contains("cursor"));
+        assert!(output.contains("Build"));
+        assert!(output.contains("PROMPT.md"));
+        assert!(output.contains("10"));
+        assert!(output.contains("DONE"));
+        assert!(output.contains("enabled"));
+    }
+
+    #[test]
+    fn test_format_banner_unlimited() {
+        let banner = BannerInfo {
+            provider: "claude".to_string(),
+            mode: "Plan".to_string(),
+            prompt_file: "/project/PROMPT_plan.md".to_string(),
+            iteration: 1,
+            max_iterations: None,
+            promise: None,
+            sandbox_enabled: false,
+        };
+
+        let output = format_banner(&banner);
+        assert!(output.contains("unlimited"));
+        assert!(output.contains("none"));
+        assert!(output.contains("disabled"));
+    }
+
+    #[test]
+    fn test_format_iteration_header() {
+        let output = format_iteration_header(5);
+        assert!(output.contains("Iteration"));
+        assert!(output.contains("5"));
+    }
+
+    #[test]
+    fn test_format_max_iterations_reached() {
+        let output = format_max_iterations_reached(10);
+        assert!(output.contains("Max iterations"));
+        assert!(output.contains("10"));
+    }
+
+    #[test]
+    fn test_format_completion_detected() {
+        let output = format_completion_detected(Some("ALL TESTS PASS"));
+        assert!(output.contains("Completion detected"));
+        assert!(output.contains("ALL TESTS PASS"));
+
+        let output_none = format_completion_detected(None);
+        assert!(output_none.contains("task complete"));
+    }
+
+    #[test]
+    fn test_format_loop_finished() {
+        let output = format_loop_finished(7);
+        assert!(output.contains("loop finished"));
+        assert!(output.contains("7"));
+    }
 }

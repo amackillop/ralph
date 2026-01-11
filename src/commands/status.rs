@@ -1,61 +1,227 @@
+//! Show current Ralph loop status.
+//!
+//! Separates display formatting from state loading for testability.
+//! Formatting is pure. IO happens only at the top level.
+
 use anyhow::{Context, Result};
 use colored::Colorize;
+use std::fmt::Write;
 
 use crate::state::RalphState;
 
-pub async fn run() -> Result<()> {
-    let cwd = std::env::current_dir().context("Failed to get current directory")?;
+/// Formatted status output for display
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StatusDisplay {
+    pub active: bool,
+    pub mode: String,
+    pub iteration: u32,
+    pub max_iterations: Option<u32>,
+    pub promise: Option<String>,
+    pub started_at: String,
+    pub last_iteration_at: Option<String>,
+}
 
-    match RalphState::load(&cwd)? {
-        Some(state) => {
-            println!("\n{}", "━".repeat(50).dimmed());
-            println!("{}", "   🔄 Ralph Loop Status".yellow().bold());
-            println!("{}", "━".repeat(50).dimmed());
+impl From<&RalphState> for StatusDisplay {
+    fn from(state: &RalphState) -> Self {
+        Self {
+            active: state.active,
+            mode: format!("{:?}", state.mode),
+            iteration: state.iteration,
+            max_iterations: state.max_iterations,
+            promise: state.completion_promise.clone(),
+            started_at: state.started_at.format("%Y-%m-%d %H:%M:%S UTC").to_string(),
+            last_iteration_at: state
+                .last_iteration_at
+                .map(|dt| dt.format("%Y-%m-%d %H:%M:%S UTC").to_string()),
+        }
+    }
+}
 
-            let status = if state.active {
-                "active".green().bold()
-            } else {
-                "inactive".red()
-            };
-            println!("  Status:     {}", status);
-
-            println!("  Mode:       {}", format!("{:?}", state.mode).cyan());
-            println!("  Iteration:  {}", state.iteration.to_string().cyan());
-            println!(
+/// Format status for terminal output (plain text, testable)
+/// Used in tests; available for non-TTY output scenarios
+#[allow(dead_code)]
+pub fn format_status(status: Option<&StatusDisplay>) -> String {
+    let mut out = String::new();
+    match status {
+        Some(s) => {
+            writeln!(
+                &mut out,
+                "  Status:     {}",
+                if s.active { "active" } else { "inactive" }
+            )
+            .unwrap();
+            writeln!(&mut out, "  Mode:       {}", s.mode).unwrap();
+            writeln!(&mut out, "  Iteration:  {}", s.iteration).unwrap();
+            writeln!(
+                &mut out,
                 "  Max:        {}",
-                state
-                    .max_iterations
+                s.max_iterations
+                    .map(|n| n.to_string())
+                    .unwrap_or_else(|| "unlimited".to_string())
+            )
+            .unwrap();
+            writeln!(
+                &mut out,
+                "  Promise:    {}",
+                s.promise.as_deref().unwrap_or("none")
+            )
+            .unwrap();
+            writeln!(&mut out, "  Started:    {}", s.started_at).unwrap();
+            if let Some(ref last) = s.last_iteration_at {
+                writeln!(&mut out, "  Last iter:  {}", last).unwrap();
+            }
+        }
+        None => {
+            writeln!(&mut out, "No active Ralph loop found.").unwrap();
+            writeln!(&mut out, "Run 'ralph loop' to start one.").unwrap();
+        }
+    }
+    out
+}
+
+/// Format status with colors for terminal display
+pub fn format_status_colored(status: Option<&StatusDisplay>) -> String {
+    let mut out = String::new();
+    match status {
+        Some(s) => {
+            writeln!(&mut out, "\n{}", "━".repeat(50).dimmed()).unwrap();
+            writeln!(&mut out, "{}", "   🔄 Ralph Loop Status".yellow().bold()).unwrap();
+            writeln!(&mut out, "{}", "━".repeat(50).dimmed()).unwrap();
+
+            let active_str = if s.active {
+                "active".green().bold().to_string()
+            } else {
+                "inactive".red().to_string()
+            };
+            writeln!(&mut out, "  Status:     {}", active_str).unwrap();
+            writeln!(&mut out, "  Mode:       {}", s.mode.cyan()).unwrap();
+            writeln!(&mut out, "  Iteration:  {}", s.iteration.to_string().cyan()).unwrap();
+            writeln!(
+                &mut out,
+                "  Max:        {}",
+                s.max_iterations
                     .map(|n| n.to_string())
                     .unwrap_or_else(|| "unlimited".to_string())
                     .cyan()
-            );
-            println!(
+            )
+            .unwrap();
+            writeln!(
+                &mut out,
                 "  Promise:    {}",
-                state.completion_promise.as_deref().unwrap_or("none").cyan()
-            );
-            println!(
-                "  Started:    {}",
-                state
-                    .started_at
-                    .format("%Y-%m-%d %H:%M:%S UTC")
-                    .to_string()
-                    .cyan()
-            );
+                s.promise.as_deref().unwrap_or("none").cyan()
+            )
+            .unwrap();
+            writeln!(&mut out, "  Started:    {}", s.started_at.cyan()).unwrap();
 
-            if let Some(last) = state.last_iteration_at {
-                println!(
-                    "  Last iter:  {}",
-                    last.format("%Y-%m-%d %H:%M:%S UTC").to_string().cyan()
-                );
+            if let Some(ref last) = s.last_iteration_at {
+                writeln!(&mut out, "  Last iter:  {}", last.cyan()).unwrap();
             }
 
-            println!("{}", "━".repeat(50).dimmed());
+            writeln!(&mut out, "{}", "━".repeat(50).dimmed()).unwrap();
         }
         None => {
-            println!("\n{} No active Ralph loop found.", "ℹ".blue());
-            println!("  Run {} to start one.", "cursor-ralph loop".green());
+            writeln!(&mut out, "\n{} No active Ralph loop found.", "ℹ".blue()).unwrap();
+            writeln!(&mut out, "  Run {} to start one.", "ralph loop".green()).unwrap();
         }
     }
+    out
+}
+
+/// Entry point: runs status with real filesystem
+pub async fn run() -> Result<()> {
+    let cwd = std::env::current_dir().context("Failed to get current directory")?;
+
+    let status = RalphState::load(&cwd)?.map(|s| StatusDisplay::from(&s));
+    print!("{}", format_status_colored(status.as_ref()));
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::state::Mode;
+    use chrono::Utc;
+
+    #[test]
+    fn test_status_display_from_state() {
+        let state = RalphState {
+            active: true,
+            mode: Mode::Build,
+            iteration: 5,
+            max_iterations: Some(10),
+            completion_promise: Some("DONE".to_string()),
+            started_at: Utc::now(),
+            last_iteration_at: None,
+        };
+
+        let status = StatusDisplay::from(&state);
+        assert!(status.active);
+        assert_eq!(status.mode, "Build");
+        assert_eq!(status.iteration, 5);
+        assert_eq!(status.max_iterations, Some(10));
+        assert_eq!(status.promise, Some("DONE".to_string()));
+    }
+
+    #[test]
+    fn test_format_status_with_state() {
+        let status = StatusDisplay {
+            active: true,
+            mode: "Build".to_string(),
+            iteration: 3,
+            max_iterations: Some(20),
+            promise: Some("COMPLETE".to_string()),
+            started_at: "2024-01-01 12:00:00 UTC".to_string(),
+            last_iteration_at: Some("2024-01-01 12:05:00 UTC".to_string()),
+        };
+
+        let output = format_status(Some(&status));
+        assert!(output.contains("active"));
+        assert!(output.contains("Build"));
+        assert!(output.contains("3"));
+        assert!(output.contains("20"));
+        assert!(output.contains("COMPLETE"));
+        assert!(output.contains("12:05:00"));
+    }
+
+    #[test]
+    fn test_format_status_none() {
+        let output = format_status(None);
+        assert!(output.contains("No active Ralph loop"));
+    }
+
+    #[test]
+    fn test_format_status_unlimited_iterations() {
+        let status = StatusDisplay {
+            active: false,
+            mode: "Plan".to_string(),
+            iteration: 1,
+            max_iterations: None,
+            promise: None,
+            started_at: "2024-01-01 12:00:00 UTC".to_string(),
+            last_iteration_at: None,
+        };
+
+        let output = format_status(Some(&status));
+        assert!(output.contains("unlimited"));
+        assert!(output.contains("none"));
+        assert!(output.contains("inactive"));
+    }
+
+    #[test]
+    fn test_format_status_colored_has_banner() {
+        let status = StatusDisplay {
+            active: true,
+            mode: "Build".to_string(),
+            iteration: 1,
+            max_iterations: None,
+            promise: None,
+            started_at: "2024-01-01 12:00:00 UTC".to_string(),
+            last_iteration_at: None,
+        };
+
+        let output = format_status_colored(Some(&status));
+        assert!(output.contains("Ralph Loop Status"));
+        assert!(output.contains("━"));
+    }
 }

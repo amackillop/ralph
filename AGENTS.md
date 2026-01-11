@@ -35,6 +35,9 @@ cargo clippy --all-targets -- -D warnings
 # Run tests
 cargo test
 
+# Check coverage (required - must be >= 85%)
+nix run .#coverage
+
 # Full Nix check (build + clippy + fmt + test)
 nix flake check
 ```

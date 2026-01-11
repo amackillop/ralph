@@ -241,22 +241,62 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_parse_memory_limit() {
+    fn test_parse_memory_limit_gigabytes() {
         assert_eq!(parse_memory_limit("8g").unwrap(), 8 * 1024 * 1024 * 1024);
-        assert_eq!(parse_memory_limit("512m").unwrap(), 512 * 1024 * 1024);
         assert_eq!(parse_memory_limit("1G").unwrap(), 1024 * 1024 * 1024);
+        assert_eq!(parse_memory_limit("16g").unwrap(), 16 * 1024 * 1024 * 1024);
     }
 
     #[test]
-    fn test_expand_path() {
-        // Test non-tilde path
-        assert_eq!(expand_path("/usr/bin").unwrap(), "/usr/bin");
+    fn test_parse_memory_limit_megabytes() {
+        assert_eq!(parse_memory_limit("512m").unwrap(), 512 * 1024 * 1024);
+        assert_eq!(parse_memory_limit("256M").unwrap(), 256 * 1024 * 1024);
+        assert_eq!(parse_memory_limit("1024m").unwrap(), 1024 * 1024 * 1024);
+    }
 
-        // Test tilde expansion (only works if home dir is set)
+    #[test]
+    fn test_parse_memory_limit_bytes() {
+        assert_eq!(parse_memory_limit("1073741824").unwrap(), 1073741824);
+    }
+
+    #[test]
+    fn test_parse_memory_limit_invalid() {
+        assert!(parse_memory_limit("invalid").is_err());
+        assert!(parse_memory_limit("abc").is_err());
+    }
+
+    #[test]
+    fn test_expand_path_absolute() {
+        assert_eq!(expand_path("/usr/bin").unwrap(), "/usr/bin");
+        assert_eq!(
+            expand_path("/home/user/project").unwrap(),
+            "/home/user/project"
+        );
+    }
+
+    #[test]
+    fn test_expand_path_relative() {
+        assert_eq!(expand_path("./local/path").unwrap(), "./local/path");
+        assert_eq!(expand_path("relative").unwrap(), "relative");
+    }
+
+    #[test]
+    fn test_expand_path_tilde() {
         if dirs::home_dir().is_some() {
             let expanded = expand_path("~/.ssh").unwrap();
             assert!(!expanded.starts_with("~"));
             assert!(expanded.ends_with("/.ssh"));
+
+            let expanded = expand_path("~/Documents/code").unwrap();
+            assert!(!expanded.starts_with("~"));
+            assert!(expanded.ends_with("/Documents/code"));
         }
+    }
+
+    #[test]
+    fn test_sandbox_runner_new() {
+        let config = Config::default();
+        let runner = SandboxRunner::new(config.clone());
+        assert_eq!(runner.config.sandbox.enabled, config.sandbox.enabled);
     }
 }
