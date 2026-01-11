@@ -5,7 +5,7 @@
 //! agent -p "prompt" --output-format text
 //! ```
 //!
-//! See: https://cursor.com/docs/cli/overview
+//! See: <https://cursor.com/docs/cli/overview>
 
 use anyhow::{Context, Result};
 use async_trait::async_trait;
@@ -15,13 +15,14 @@ use tracing::{debug, info, warn};
 use super::AgentProvider;
 use crate::config::CursorConfig;
 
-/// Cursor CLI agent provider
-pub struct CursorProvider {
+/// Cursor CLI agent provider.
+pub(crate) struct CursorProvider {
     config: CursorConfig,
 }
 
 impl CursorProvider {
-    pub fn new(config: CursorConfig) -> Self {
+    /// Creates a new Cursor provider with the given configuration.
+    pub(crate) fn new(config: CursorConfig) -> Self {
         Self { config }
     }
 }
@@ -60,15 +61,14 @@ impl AgentProvider for CursorProvider {
             .await
             .with_context(|| {
                 format!(
-                    "Failed to run Cursor agent '{}'. \n\
+                    "Failed to run Cursor agent '{agent_path}'. \n\
                      \n\
                      Make sure the Cursor CLI is installed:\n\
                      - Install: curl https://cursor.com/install -fsS | bash\n\
                      - On NixOS: set [agent.cursor].path = \"cursor-agent\" in ralph.toml\n\
                      - Or specify a full path: [agent.cursor].path = \"/path/to/agent\"\n\
                      \n\
-                     See: https://cursor.com/docs/cli/overview",
-                    agent_path
+                     See: https://cursor.com/docs/cli/overview"
                 )
             })?;
 
@@ -78,7 +78,7 @@ impl AgentProvider for CursorProvider {
 
             if stderr.contains("command not found") || stderr.contains("No such file") {
                 anyhow::bail!(
-                    "Cursor agent '{}' not found.\n\
+                    "Cursor agent '{agent_path}' not found.\n\
                      \n\
                      Install the Cursor CLI:\n\
                      - curl https://cursor.com/install -fsS | bash\n\
@@ -86,8 +86,7 @@ impl AgentProvider for CursorProvider {
                      Or configure the path in ralph.toml:\n\
                      [agent.cursor]\n\
                      path = \"cursor-agent\"  # NixOS\n\
-                     path = \"/full/path/to/agent\"  # Custom path",
-                    agent_path
+                     path = \"/full/path/to/agent\"  # Custom path"
                 );
             }
 

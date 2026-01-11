@@ -3,7 +3,7 @@
 //! This module runs the iterative AI development loop. Core logic
 //! is separated into testable functions where possible.
 
-use anyhow::{bail, Context, Result};
+use anyhow::{Context, Result, bail};
 use clap::ValueEnum;
 use colored::Colorize;
 use std::path::{Path, PathBuf};
@@ -14,98 +14,12 @@ use crate::config::Config;
 use crate::detection::CompletionDetector;
 use crate::state::{Mode, RalphState};
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
-pub enum LoopMode {
-    Plan,
-    Build,
-}
+// -----------------------------------------------------------------------------
+// Public API
+// -----------------------------------------------------------------------------
 
-impl From<LoopMode> for Mode {
-    fn from(mode: LoopMode) -> Self {
-        match mode {
-            LoopMode::Plan => Mode::Plan,
-            LoopMode::Build => Mode::Build,
-        }
-    }
-}
-
-/// Determine the prompt file path based on mode and custom override
-pub fn determine_prompt_file(cwd: &Path, mode: LoopMode, custom_prompt: Option<&str>) -> PathBuf {
-    match custom_prompt {
-        Some(p) => PathBuf::from(p),
-        None => match mode {
-            LoopMode::Plan => cwd.join("PROMPT_plan.md"),
-            LoopMode::Build => cwd.join("PROMPT_build.md"),
-        },
-    }
-}
-
-/// Prepare state with CLI options
-pub fn prepare_state(
-    mut state: RalphState,
-    max_iterations: u32,
-    completion_promise: Option<String>,
-) -> RalphState {
-    state.max_iterations = if max_iterations > 0 {
-        Some(max_iterations)
-    } else {
-        None
-    };
-    state.completion_promise = completion_promise;
-    state.active = true;
-    state
-}
-
-/// Check if max iterations has been reached
-pub fn is_max_iterations_reached(state: &RalphState) -> bool {
-    state
-        .max_iterations
-        .map(|max| state.iteration > max)
-        .unwrap_or(false)
-}
-
-/// Outcome of a single loop iteration
-#[derive(Debug, Clone, PartialEq, Eq)]
-#[allow(dead_code)]
-pub enum IterationOutcome {
-    Continue,
-    MaxIterationsReached,
-    CompletionDetected,
-}
-
-/// Format banner information for display
-#[derive(Debug, Clone)]
-pub struct BannerInfo {
-    pub provider: String,
-    pub mode: String,
-    pub prompt_file: String,
-    pub iteration: u32,
-    pub max_iterations: Option<u32>,
-    pub promise: Option<String>,
-    pub sandbox_enabled: bool,
-}
-
-impl BannerInfo {
-    pub fn new(
-        state: &RalphState,
-        prompt_file: &Path,
-        no_sandbox: bool,
-        config: &Config,
-        provider: Provider,
-    ) -> Self {
-        Self {
-            provider: provider.to_string(),
-            mode: format!("{:?}", state.mode),
-            prompt_file: prompt_file.display().to_string(),
-            iteration: state.iteration,
-            max_iterations: state.max_iterations,
-            promise: state.completion_promise.clone(),
-            sandbox_enabled: !no_sandbox && config.sandbox.enabled,
-        }
-    }
-}
-
-pub async fn run(
+/// Runs the main Ralph loop with the specified configuration.
+pub(crate) async fn run(
     mode: LoopMode,
     max_iterations: u32,
     completion_promise: Option<String>,
@@ -149,7 +63,9 @@ pub async fn run(
 
     // Warn about sandbox (not yet implemented for multi-provider)
     if banner.sandbox_enabled {
-        warn!("Docker sandbox is not yet implemented for the provider system. Running without sandbox.");
+        warn!(
+            "Docker sandbox is not yet implemented for the provider system. Running without sandbox."
+        );
     }
 
     // Main loop
@@ -195,10 +111,10 @@ pub async fn run(
         }
 
         // Git operations
-        if config.git.auto_push {
-            if let Err(e) = git_push(&cwd).await {
-                warn!("Git push failed: {}", e);
-            }
+        if config.git.auto_push
+            && let Err(e) = git_push(&cwd).await
+        {
+            warn!("Git push failed: {e}");
         }
 
         // Increment iteration
@@ -211,8 +127,120 @@ pub async fn run(
     Ok(())
 }
 
-/// Format banner for display (colored output)
-pub fn format_banner(info: &BannerInfo) -> String {
+// -----------------------------------------------------------------------------
+// Public types
+// -----------------------------------------------------------------------------
+
+/// Loop execution mode for the CLI.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+pub(crate) enum LoopMode {
+    /// Planning mode - generates implementation plans.
+    Plan,
+    /// Build mode - implements features.
+    Build,
+}
+
+impl From<LoopMode> for Mode {
+    fn from(mode: LoopMode) -> Self {
+        match mode {
+            LoopMode::Plan => Self::Plan,
+            LoopMode::Build => Self::Build,
+        }
+    }
+}
+
+// -----------------------------------------------------------------------------
+// Internal types
+// -----------------------------------------------------------------------------
+
+/// Outcome of a single loop iteration.
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[allow(dead_code)]
+enum IterationOutcome {
+    /// Continue to next iteration.
+    Continue,
+    /// Max iterations reached, stop loop.
+    MaxIterationsReached,
+    /// Completion promise detected, stop loop.
+    CompletionDetected,
+}
+
+/// Banner information for display at loop start.
+#[derive(Debug, Clone)]
+struct BannerInfo {
+    provider: String,
+    mode: String,
+    prompt_file: String,
+    iteration: u32,
+    max_iterations: Option<u32>,
+    promise: Option<String>,
+    sandbox_enabled: bool,
+}
+
+impl BannerInfo {
+    fn new(
+        state: &RalphState,
+        prompt_file: &Path,
+        no_sandbox: bool,
+        config: &Config,
+        provider: Provider,
+    ) -> Self {
+        Self {
+            provider: provider.to_string(),
+            mode: format!("{:?}", state.mode),
+            prompt_file: prompt_file.display().to_string(),
+            iteration: state.iteration,
+            max_iterations: state.max_iterations,
+            promise: state.completion_promise.clone(),
+            sandbox_enabled: !no_sandbox && config.sandbox.enabled,
+        }
+    }
+}
+
+// -----------------------------------------------------------------------------
+// Helper functions
+// -----------------------------------------------------------------------------
+
+/// Determines the prompt file path based on mode and custom override.
+fn determine_prompt_file(cwd: &Path, mode: LoopMode, custom_prompt: Option<&str>) -> PathBuf {
+    match custom_prompt {
+        Some(p) => PathBuf::from(p),
+        None => match mode {
+            LoopMode::Plan => cwd.join("PROMPT_plan.md"),
+            LoopMode::Build => cwd.join("PROMPT_build.md"),
+        },
+    }
+}
+
+/// Prepares state with CLI options.
+fn prepare_state(
+    mut state: RalphState,
+    max_iterations: u32,
+    completion_promise: Option<String>,
+) -> RalphState {
+    state.max_iterations = if max_iterations > 0 {
+        Some(max_iterations)
+    } else {
+        None
+    };
+    state.completion_promise = completion_promise;
+    state.active = true;
+    state
+}
+
+/// Checks if max iterations has been reached.
+fn is_max_iterations_reached(state: &RalphState) -> bool {
+    state
+        .max_iterations
+        .is_some_and(|max| state.iteration > max)
+}
+
+// -----------------------------------------------------------------------------
+// Formatting functions
+// -----------------------------------------------------------------------------
+
+/// Formats the startup banner for display.
+fn format_banner(info: &BannerInfo) -> String {
     use std::fmt::Write;
     let mut out = String::new();
 
@@ -233,8 +261,7 @@ pub fn format_banner(info: &BannerInfo) -> String {
         &mut out,
         "  Max:        {}",
         info.max_iterations
-            .map(|n| n.to_string())
-            .unwrap_or_else(|| "unlimited".to_string())
+            .map_or_else(|| "unlimited".to_string(), |n| n.to_string())
             .cyan()
     )
     .unwrap();
@@ -250,7 +277,7 @@ pub fn format_banner(info: &BannerInfo) -> String {
     } else {
         "disabled".red()
     };
-    writeln!(&mut out, "  Sandbox:    {}", sandbox_status).unwrap();
+    writeln!(&mut out, "  Sandbox:    {sandbox_status}").unwrap();
 
     writeln!(&mut out, "{}", "━".repeat(50).dimmed()).unwrap();
     writeln!(
@@ -263,8 +290,8 @@ pub fn format_banner(info: &BannerInfo) -> String {
     out
 }
 
-/// Format iteration header
-pub fn format_iteration_header(iteration: u32) -> String {
+/// Formats the iteration header line.
+fn format_iteration_header(iteration: u32) -> String {
     format!(
         "\n{} Iteration {} {}",
         "━".repeat(20).dimmed(),
@@ -273,13 +300,13 @@ pub fn format_iteration_header(iteration: u32) -> String {
     )
 }
 
-/// Format max iterations reached message
-pub fn format_max_iterations_reached(max: u32) -> String {
+/// Formats the max iterations reached message.
+fn format_max_iterations_reached(max: u32) -> String {
     format!("\n{} Max iterations ({}) reached.", "🛑".red(), max)
 }
 
-/// Format completion detected message
-pub fn format_completion_detected(promise: Option<&str>) -> String {
+/// Formats the completion detected message.
+fn format_completion_detected(promise: Option<&str>) -> String {
     format!(
         "\n{} Completion detected: {}",
         "✅".green(),
@@ -287,8 +314,8 @@ pub fn format_completion_detected(promise: Option<&str>) -> String {
     )
 }
 
-/// Format loop finished message
-pub fn format_loop_finished(total_iterations: u32) -> String {
+/// Formats the loop finished message.
+fn format_loop_finished(total_iterations: u32) -> String {
     use std::fmt::Write;
     let mut out = String::new();
     writeln!(&mut out, "\n{} Ralph loop finished.", "🎉".green()).unwrap();
@@ -300,6 +327,10 @@ pub fn format_loop_finished(total_iterations: u32) -> String {
     .unwrap();
     out
 }
+
+// -----------------------------------------------------------------------------
+// Git operations
+// -----------------------------------------------------------------------------
 
 async fn git_push(cwd: &Path) -> Result<()> {
     debug!("Pushing to git...");
@@ -336,6 +367,10 @@ async fn get_current_branch(cwd: &Path) -> Result<String> {
 
     Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
 }
+
+// -----------------------------------------------------------------------------
+// Tests
+// -----------------------------------------------------------------------------
 
 #[cfg(test)]
 mod tests {
@@ -514,7 +549,7 @@ mod tests {
     fn test_format_iteration_header() {
         let output = format_iteration_header(5);
         assert!(output.contains("Iteration"));
-        assert!(output.contains("5"));
+        assert!(output.contains('5'));
     }
 
     #[test]
@@ -538,6 +573,6 @@ mod tests {
     fn test_format_loop_finished() {
         let output = format_loop_finished(7);
         assert!(output.contains("loop finished"));
-        assert!(output.contains("7"));
+        assert!(output.contains('7'));
     }
 }

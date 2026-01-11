@@ -1,3 +1,8 @@
+//! Configuration file parsing for `ralph.toml`.
+//!
+//! Handles loading and parsing of project configuration including agent settings,
+//! sandbox configuration, git options, and completion detection.
+
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 use std::fs;
@@ -7,21 +12,26 @@ use crate::agent::Provider;
 
 const CONFIG_FILE: &str = "ralph.toml";
 
+/// Top-level Ralph configuration loaded from `ralph.toml`.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
-pub struct Config {
+pub(crate) struct Config {
+    /// Agent provider configuration.
     #[serde(default)]
     pub agent: AgentConfig,
+    /// Docker sandbox configuration.
     #[serde(default)]
     pub sandbox: SandboxConfig,
+    /// Git integration settings.
     #[serde(default)]
     pub git: GitConfig,
+    /// Completion detection settings.
     #[serde(default)]
     pub completion: CompletionConfig,
 }
 
-/// Agent configuration - selects and configures the AI agent CLI
+/// Agent configuration - selects and configures the AI agent CLI.
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct AgentConfig {
+pub(crate) struct AgentConfig {
     /// Which agent provider to use: "cursor" or "claude"
     #[serde(default = "default_provider")]
     pub provider: String,
@@ -56,9 +66,9 @@ fn default_provider() -> String {
     "cursor".to_string()
 }
 
-/// Cursor CLI configuration
+/// Cursor CLI configuration.
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct CursorConfig {
+pub(crate) struct CursorConfig {
     /// Path to the Cursor agent CLI
     /// - Default: "agent"
     /// - NixOS: "cursor-agent"
@@ -93,9 +103,9 @@ fn default_output_format() -> String {
     "text".to_string()
 }
 
-/// Claude Code CLI configuration
+/// Claude Code CLI configuration.
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ClaudeConfig {
+pub(crate) struct ClaudeConfig {
     /// Path to the Claude CLI
     /// - Default: "claude"
     /// - Custom: "/path/to/claude"
@@ -141,9 +151,10 @@ fn default_claude_output_format() -> String {
     "stream-json".to_string()
 }
 
+/// Docker sandbox configuration for isolated execution.
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct SandboxConfig {
-    /// Enable/disable Docker sandboxing
+pub(crate) struct SandboxConfig {
+    /// Enable/disable Docker sandboxing.
     #[serde(default = "default_true")]
     pub enabled: bool,
 
@@ -176,34 +187,43 @@ impl Default for SandboxConfig {
     }
 }
 
+/// Volume mount configuration for Docker containers.
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct Mount {
+pub(crate) struct Mount {
+    /// Host path to mount.
     pub host: String,
+    /// Container path to mount to.
     pub container: String,
+    /// Whether the mount is read-only.
     #[serde(default = "default_true")]
     pub readonly: bool,
 }
 
+/// Network access policy for sandbox containers.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
-pub enum NetworkPolicy {
+pub(crate) enum NetworkPolicy {
+    /// Allow all network access.
     #[default]
     AllowAll,
+    /// Only allow access to specified domains.
     Allowlist,
+    /// Deny all network access.
     Deny,
 }
 
+/// Network configuration for sandbox containers.
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct NetworkConfig {
-    /// Network policy
+pub(crate) struct NetworkConfig {
+    /// Network access policy.
     #[serde(default)]
     pub policy: NetworkPolicy,
 
-    /// Allowed domains when policy = "allowlist"
+    /// Allowed domains when policy is `Allowlist`.
     #[serde(default)]
     pub allowed: Vec<String>,
 
-    /// Custom DNS servers
+    /// Custom DNS servers.
     #[serde(default = "default_dns")]
     pub dns: Vec<String>,
 }
@@ -218,17 +238,18 @@ impl Default for NetworkConfig {
     }
 }
 
+/// Resource limits for sandbox containers.
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ResourceConfig {
-    /// Memory limit (e.g., "8g")
+pub(crate) struct ResourceConfig {
+    /// Memory limit (e.g., "8g", "512m").
     #[serde(default = "default_memory")]
     pub memory: String,
 
-    /// CPU limit (e.g., "4")
+    /// CPU limit (e.g., "4", "2.5").
     #[serde(default = "default_cpus")]
     pub cpus: String,
 
-    /// Timeout in minutes
+    /// Timeout in minutes before killing the container.
     #[serde(default = "default_timeout")]
     pub timeout_minutes: u32,
 }
@@ -243,13 +264,14 @@ impl Default for ResourceConfig {
     }
 }
 
+/// Git integration configuration.
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct GitConfig {
-    /// Auto-push after each iteration
+pub(crate) struct GitConfig {
+    /// Automatically push after each iteration.
     #[serde(default = "default_true")]
     pub auto_push: bool,
 
-    /// Protected branches
+    /// Branches that should not be modified directly.
     #[serde(default = "default_protected_branches")]
     pub protected_branches: Vec<String>,
 }
@@ -263,9 +285,10 @@ impl Default for GitConfig {
     }
 }
 
+/// Completion detection configuration.
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct CompletionConfig {
-    /// Promise format template
+pub(crate) struct CompletionConfig {
+    /// Format template for completion promises (use `{}` as placeholder).
     #[serde(default = "default_promise_format")]
     pub promise_format: String,
 }

@@ -7,7 +7,7 @@
 //!
 //! The prompt is piped via stdin.
 //!
-//! See: https://docs.anthropic.com/en/docs/claude-code
+//! See: <https://docs.anthropic.com/en/docs/claude-code>
 
 use anyhow::{Context, Result};
 use async_trait::async_trait;
@@ -19,13 +19,14 @@ use tracing::{debug, info, warn};
 use super::AgentProvider;
 use crate::config::ClaudeConfig;
 
-/// Claude Code CLI agent provider
-pub struct ClaudeProvider {
+/// Claude Code CLI agent provider.
+pub(crate) struct ClaudeProvider {
     config: ClaudeConfig,
 }
 
 impl ClaudeProvider {
-    pub fn new(config: ClaudeConfig) -> Self {
+    /// Creates a new Claude provider with the given configuration.
+    pub(crate) fn new(config: ClaudeConfig) -> Self {
         Self { config }
     }
 }
@@ -77,7 +78,7 @@ impl AgentProvider for ClaudeProvider {
             .spawn()
             .with_context(|| {
                 format!(
-                    "Failed to run Claude agent '{}'. \n\
+                    "Failed to run Claude agent '{claude_path}'. \n\
                      \n\
                      Make sure Claude Code CLI is installed:\n\
                      - Install: npm install -g @anthropic-ai/claude-code\n\
@@ -86,8 +87,7 @@ impl AgentProvider for ClaudeProvider {
                      Configure the path in ralph.toml:\n\
                      [agent.claude]\n\
                      path = \"claude\"  # Default\n\
-                     path = \"/full/path/to/claude\"  # Custom path",
-                    claude_path
+                     path = \"/full/path/to/claude\"  # Custom path"
                 )
             })?;
 
@@ -105,15 +105,14 @@ impl AgentProvider for ClaudeProvider {
 
             if stderr.contains("command not found") || stderr.contains("No such file") {
                 anyhow::bail!(
-                    "Claude agent '{}' not found.\n\
+                    "Claude agent '{claude_path}' not found.\n\
                      \n\
                      Install Claude Code CLI:\n\
                      - npm install -g @anthropic-ai/claude-code\n\
                      \n\
                      Or configure the path in ralph.toml:\n\
                      [agent.claude]\n\
-                     path = \"/full/path/to/claude\"",
-                    claude_path
+                     path = \"/full/path/to/claude\""
                 );
             }
 

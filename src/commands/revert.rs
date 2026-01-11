@@ -2,85 +2,18 @@
 //!
 //! Core validation is pure. Git operations are injected.
 
-use anyhow::{bail, Context, Result};
+use anyhow::{Context, Result, bail};
 use colored::Colorize;
 use std::path::PathBuf;
 use tracing::info;
 
-/// Error conditions for revert
-#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
-pub enum RevertError {
-    #[error("count must be greater than 0")]
-    InvalidCount,
-    #[error("failed to get git log")]
-    #[allow(dead_code)]
-    GitLogFailed,
-    #[error("git reset failed: {0}")]
-    #[allow(dead_code)]
-    GitResetFailed(String),
-}
+// -----------------------------------------------------------------------------
+// Public API
+// -----------------------------------------------------------------------------
 
-/// Validate revert count
-pub fn validate_count(count: u32) -> Result<(), RevertError> {
-    if count == 0 {
-        Err(RevertError::InvalidCount)
-    } else {
-        Ok(())
-    }
-}
-
-/// Parse git log output into commit lines
-pub fn parse_commits(log_output: &str) -> Vec<String> {
-    log_output
-        .lines()
-        .filter(|line| !line.is_empty())
-        .map(|s| s.to_string())
-        .collect()
-}
-
-/// Format the revert start message
-pub fn format_revert_start(count: u32) -> String {
-    format!(
-        "\n{} Reverting last {} Ralph commit(s)...",
-        "⚠".yellow(),
-        count.to_string().cyan()
-    )
-}
-
-/// Format the commits to revert list
-pub fn format_commits_to_revert(commits: &[String]) -> String {
-    use std::fmt::Write;
-    let mut out = String::new();
-    writeln!(&mut out, "\nCommits to revert:").unwrap();
-    for line in commits {
-        writeln!(&mut out, "  {}", line.dimmed()).unwrap();
-    }
-    out
-}
-
-/// Format the revert success message
-pub fn format_revert_success(count: u32) -> String {
-    use std::fmt::Write;
-    let mut out = String::new();
-    writeln!(
-        &mut out,
-        "\n{} Successfully reverted {} commit(s).",
-        "✓".green(),
-        count.to_string().cyan()
-    )
-    .unwrap();
-    writeln!(
-        &mut out,
-        "  {}",
-        "Use 'git reflog' to recover if needed.".dimmed()
-    )
-    .unwrap();
-    out
-}
-
-/// Entry point: runs revert with real git commands
-pub async fn run(count: u32) -> Result<()> {
-    validate_count(count).map_err(|e| anyhow::anyhow!("{}", e))?;
+/// Runs the revert command, resetting the specified number of commits.
+pub(crate) async fn run(count: u32) -> Result<()> {
+    validate_count(count).map_err(|e| anyhow::anyhow!("{e}"))?;
 
     let cwd = std::env::current_dir().context("Failed to get current directory")?;
 
@@ -100,6 +33,89 @@ pub async fn run(count: u32) -> Result<()> {
     Ok(())
 }
 
+// -----------------------------------------------------------------------------
+// Internal types
+// -----------------------------------------------------------------------------
+
+/// Error conditions for revert.
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+enum RevertError {
+    #[error("count must be greater than 0")]
+    InvalidCount,
+    #[error("failed to get git log")]
+    #[allow(dead_code)]
+    GitLogFailed,
+    #[error("git reset failed: {0}")]
+    #[allow(dead_code)]
+    GitResetFailed(String),
+}
+
+// -----------------------------------------------------------------------------
+// Helper functions
+// -----------------------------------------------------------------------------
+
+/// Validates that revert count is greater than zero.
+fn validate_count(count: u32) -> Result<(), RevertError> {
+    if count == 0 {
+        Err(RevertError::InvalidCount)
+    } else {
+        Ok(())
+    }
+}
+
+/// Parses git log output into commit summary lines.
+fn parse_commits(log_output: &str) -> Vec<String> {
+    log_output
+        .lines()
+        .filter(|line| !line.is_empty())
+        .map(std::string::ToString::to_string)
+        .collect()
+}
+
+/// Formats the revert start message.
+fn format_revert_start(count: u32) -> String {
+    format!(
+        "\n{} Reverting last {} Ralph commit(s)...",
+        "⚠".yellow(),
+        count.to_string().cyan()
+    )
+}
+
+/// Formats the list of commits being reverted.
+fn format_commits_to_revert(commits: &[String]) -> String {
+    use std::fmt::Write;
+    let mut out = String::new();
+    writeln!(&mut out, "\nCommits to revert:").unwrap();
+    for line in commits {
+        writeln!(&mut out, "  {}", line.dimmed()).unwrap();
+    }
+    out
+}
+
+/// Formats the revert success message.
+fn format_revert_success(count: u32) -> String {
+    use std::fmt::Write;
+    let mut out = String::new();
+    writeln!(
+        &mut out,
+        "\n{} Successfully reverted {} commit(s).",
+        "✓".green(),
+        count.to_string().cyan()
+    )
+    .unwrap();
+    writeln!(
+        &mut out,
+        "  {}",
+        "Use 'git reflog' to recover if needed.".dimmed()
+    )
+    .unwrap();
+    out
+}
+
+// -----------------------------------------------------------------------------
+// Git operations
+// -----------------------------------------------------------------------------
+
 async fn git_log(cwd: &PathBuf, count: u32) -> Result<Vec<String>> {
     let output = tokio::process::Command::new("git")
         .current_dir(cwd)
@@ -116,7 +132,7 @@ async fn git_log(cwd: &PathBuf, count: u32) -> Result<Vec<String>> {
 }
 
 async fn git_reset(cwd: &PathBuf, count: u32) -> Result<()> {
-    let reset_ref = format!("HEAD~{}", count);
+    let reset_ref = format!("HEAD~{count}");
     let output = tokio::process::Command::new("git")
         .current_dir(cwd)
         .args(["reset", "--hard", &reset_ref])
@@ -126,11 +142,15 @@ async fn git_reset(cwd: &PathBuf, count: u32) -> Result<()> {
 
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
-        bail!("Git reset failed: {}", stderr);
+        bail!("Git reset failed: {stderr}");
     }
 
     Ok(())
 }
+
+// -----------------------------------------------------------------------------
+// Tests
+// -----------------------------------------------------------------------------
 
 #[cfg(test)]
 mod tests {
@@ -194,7 +214,7 @@ mod tests {
     fn test_format_revert_start() {
         let output = format_revert_start(3);
         assert!(output.contains("Reverting"));
-        assert!(output.contains("3"));
+        assert!(output.contains('3'));
     }
 
     #[test]
@@ -213,7 +233,7 @@ mod tests {
     fn test_format_revert_success() {
         let output = format_revert_success(2);
         assert!(output.contains("Successfully reverted"));
-        assert!(output.contains("2"));
+        assert!(output.contains('2'));
         assert!(output.contains("git reflog"));
     }
 }

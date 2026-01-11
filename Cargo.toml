@@ -1,7 +1,7 @@
 [package]
 name = "ralph"
 version = "0.1.0"
-edition = "2021"
+edition = "2024"
 description = "Ralph Wiggum technique - iterative AI development loops"
 license = "MIT"
 repository = "https://github.com/your-org/ralph"
@@ -49,3 +49,16 @@ tempfile = "3"
 lto = true
 codegen-units = 1
 strip = true
+
+[lints.rust]
+unsafe_code = "deny"
+rust-2024-compatibility = "warn"
+missing_docs = "warn"
+
+[lints.clippy]
+correctness = "deny"
+suspicious = "warn"
+complexity = "warn"
+perf = "warn"
+style = "warn"
+pedantic = "warn"

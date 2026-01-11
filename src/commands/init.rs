@@ -11,24 +11,69 @@ use tracing::info;
 
 use crate::templates;
 
-/// File to be written during init, with its relative path and content
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct InitFile {
-    pub path: PathBuf,
-    pub content: &'static str,
-    pub description: &'static str,
+// -----------------------------------------------------------------------------
+// Public API
+// -----------------------------------------------------------------------------
+
+/// Runs the init command, creating Ralph project files.
+pub(crate) fn run(force: bool) -> Result<()> {
+    let cwd = std::env::current_dir().context("Failed to get current directory")?;
+
+    info!("Initializing Ralph in {}", cwd.display());
+
+    let files = init_files();
+
+    let results = init_project(
+        &files,
+        force,
+        |path| cwd.join(path).exists(),
+        |path| {
+            fs::create_dir_all(cwd.join(path))
+                .with_context(|| format!("Failed to create directory: {}", path.display()))
+        },
+        |path, content| {
+            fs::write(cwd.join(path), content)
+                .with_context(|| format!("Failed to write {}", path.display()))
+        },
+    )?;
+
+    print!("{}", format_results(&results, &files));
+
+    Ok(())
 }
 
-/// Result of attempting to write a file
+// -----------------------------------------------------------------------------
+// Internal types
+// -----------------------------------------------------------------------------
+
+/// File to be written during init, with its relative path and content.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub enum WriteResult {
+struct InitFile {
+    /// Relative path for the file.
+    path: PathBuf,
+    /// File content.
+    content: &'static str,
+    /// Human-readable description.
+    description: &'static str,
+}
+
+/// Result of attempting to write a file.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum WriteResult {
+    /// File was created.
     Created,
+    /// File was overwritten.
     Overwritten,
+    /// File was skipped (already exists).
     Skipped,
 }
 
-/// Files to initialize in a Ralph project
-pub fn init_files() -> Vec<InitFile> {
+// -----------------------------------------------------------------------------
+// Helper functions
+// -----------------------------------------------------------------------------
+
+/// Returns the list of files to initialize in a Ralph project.
+fn init_files() -> Vec<InitFile> {
     vec![
         InitFile {
             path: PathBuf::from("ralph.toml"),
@@ -64,7 +109,7 @@ pub fn init_files() -> Vec<InitFile> {
 /// - `exists`: checks if a path exists
 /// - `create_dir`: creates a directory (and parents)
 /// - `write_file`: writes content to a path
-pub fn init_project<E, D, W>(
+fn init_project<E, D, W>(
     files: &[InitFile],
     force: bool,
     exists: E,
@@ -108,35 +153,8 @@ where
     Ok(results)
 }
 
-/// Entry point: runs init with real filesystem operations
-pub async fn run(force: bool) -> Result<()> {
-    let cwd = std::env::current_dir().context("Failed to get current directory")?;
-
-    info!("Initializing Ralph in {}", cwd.display());
-
-    let files = init_files();
-
-    let results = init_project(
-        &files,
-        force,
-        |path| cwd.join(path).exists(),
-        |path| {
-            fs::create_dir_all(cwd.join(path))
-                .with_context(|| format!("Failed to create directory: {}", path.display()))
-        },
-        |path, content| {
-            fs::write(cwd.join(path), content)
-                .with_context(|| format!("Failed to write {}", path.display()))
-        },
-    )?;
-
-    print!("{}", format_results(&results, &files));
-
-    Ok(())
-}
-
-/// Format init results for display (colored output)
-pub fn format_results(results: &[(PathBuf, WriteResult)], files: &[InitFile]) -> String {
+/// Formats init results for display with colored output.
+fn format_results(results: &[(PathBuf, WriteResult)], files: &[InitFile]) -> String {
     use std::fmt::Write;
     let mut out = String::new();
 
@@ -152,8 +170,7 @@ pub fn format_results(results: &[(PathBuf, WriteResult)], files: &[InitFile]) ->
         let desc = files
             .iter()
             .find(|f| &f.path == path)
-            .map(|f| f.description)
-            .unwrap_or("");
+            .map_or("", |f| f.description);
 
         match result {
             WriteResult::Created => {
@@ -221,6 +238,10 @@ pub fn format_results(results: &[(PathBuf, WriteResult)], files: &[InitFile]) ->
     out
 }
 
+// -----------------------------------------------------------------------------
+// Tests
+// -----------------------------------------------------------------------------
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -231,9 +252,11 @@ mod tests {
     fn test_init_files_not_empty() {
         let files = init_files();
         assert!(!files.is_empty());
-        assert!(files
-            .iter()
-            .any(|f| f.path.as_path() == Path::new("ralph.toml")));
+        assert!(
+            files
+                .iter()
+                .any(|f| f.path.as_path() == Path::new("ralph.toml"))
+        );
     }
 
     #[test]
@@ -269,9 +292,11 @@ mod tests {
         assert_eq!(written.borrow().len(), files.len());
 
         // .cursor/rules directory should have been created
-        assert!(dirs_created
-            .borrow()
-            .contains(&PathBuf::from(".cursor/rules")));
+        assert!(
+            dirs_created
+                .borrow()
+                .contains(&PathBuf::from(".cursor/rules"))
+        );
     }
 
     #[test]

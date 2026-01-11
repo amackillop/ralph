@@ -9,36 +9,38 @@
 mod claude;
 mod cursor;
 
-pub use claude::ClaudeProvider;
-pub use cursor::CursorProvider;
+pub(crate) use claude::ClaudeProvider;
+pub(crate) use cursor::CursorProvider;
 
 use anyhow::Result;
 use async_trait::async_trait;
 use std::path::Path;
 
-/// Trait for AI agent CLI providers
+/// Trait for AI agent CLI providers.
 #[async_trait]
-pub trait AgentProvider: Send + Sync {
-    /// Provider name for display
+pub(crate) trait AgentProvider: Send + Sync {
+    /// Returns the provider name for display.
     fn name(&self) -> &'static str;
 
-    /// Invoke the agent with a prompt and return the output
+    /// Invokes the agent with a prompt and returns the output.
     async fn invoke(&self, project_dir: &Path, prompt: &str) -> Result<String>;
 }
 
-/// Supported agent providers
+/// Supported agent providers.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
-pub enum Provider {
+pub(crate) enum Provider {
+    /// Cursor CLI agent.
     #[default]
     Cursor,
+    /// Claude Code CLI agent.
     Claude,
 }
 
 impl std::fmt::Display for Provider {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Provider::Cursor => write!(f, "cursor"),
-            Provider::Claude => write!(f, "claude"),
+            Self::Cursor => write!(f, "cursor"),
+            Self::Claude => write!(f, "claude"),
         }
     }
 }
@@ -48,9 +50,9 @@ impl std::str::FromStr for Provider {
 
     fn from_str(s: &str) -> Result<Self, Self::Err> {
         match s.to_lowercase().as_str() {
-            "cursor" => Ok(Provider::Cursor),
-            "claude" => Ok(Provider::Claude),
-            _ => anyhow::bail!("Unknown agent provider: '{}'. Supported: cursor, claude", s),
+            "cursor" => Ok(Self::Cursor),
+            "claude" => Ok(Self::Claude),
+            _ => anyhow::bail!("Unknown agent provider: '{s}'. Supported: cursor, claude"),
         }
     }
 }

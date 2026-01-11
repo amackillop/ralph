@@ -1,3 +1,8 @@
+//! Ralph loop state management.
+//!
+//! Persists loop state to `.cursor/ralph-state.toml` including iteration count,
+//! mode, completion promise, and timing information.
+
 use anyhow::{Context, Result};
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
@@ -6,21 +11,35 @@ use std::path::Path;
 
 const STATE_FILE: &str = ".cursor/ralph-state.toml";
 
+/// Loop execution mode.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
-pub enum Mode {
+pub(crate) enum Mode {
+    /// Planning mode - generates implementation plans from specs.
     Plan,
+    /// Build mode - implements features according to the plan.
     Build,
 }
 
+/// Persistent state for a Ralph loop.
+///
+/// Stored in `.cursor/ralph-state.toml` and tracks the current iteration,
+/// mode, limits, and timing information across loop restarts.
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct RalphState {
+pub(crate) struct RalphState {
+    /// Whether the loop is currently active.
     pub active: bool,
+    /// Current execution mode (Plan or Build).
     pub mode: Mode,
+    /// Current iteration number (1-indexed).
     pub iteration: u32,
+    /// Maximum iterations before auto-stop (None = unlimited).
     pub max_iterations: Option<u32>,
+    /// Phrase that signals loop completion when detected.
     pub completion_promise: Option<String>,
+    /// When the loop was started.
     pub started_at: DateTime<Utc>,
+    /// When the last iteration completed.
     pub last_iteration_at: Option<DateTime<Utc>>,
 }
 

@@ -9,13 +9,38 @@ use std::fmt::Write;
 use std::fs;
 use std::path::{Path, PathBuf};
 
-/// Files that can be cleaned
-pub fn state_files() -> Vec<PathBuf> {
+// -----------------------------------------------------------------------------
+// Public API
+// -----------------------------------------------------------------------------
+
+/// Runs the clean command, removing Ralph state and config files.
+pub(crate) fn run(all: bool) -> Result<()> {
+    let cwd = std::env::current_dir().context("Failed to get current directory")?;
+
+    let removed = clean_files(
+        all,
+        |path| cwd.join(path).exists(),
+        |path| {
+            fs::remove_file(cwd.join(path))
+                .with_context(|| format!("Failed to remove {}", path.display()))
+        },
+    )?;
+
+    print!("{}", format_results(&removed));
+    Ok(())
+}
+
+// -----------------------------------------------------------------------------
+// Helper functions
+// -----------------------------------------------------------------------------
+
+/// Returns the list of state files that can be cleaned.
+fn state_files() -> Vec<PathBuf> {
     vec![PathBuf::from(".cursor/ralph-state.toml")]
 }
 
-/// Additional files cleaned with --all
-pub fn config_files() -> Vec<PathBuf> {
+/// Returns additional config files cleaned with `--all`.
+fn config_files() -> Vec<PathBuf> {
     vec![
         PathBuf::from("ralph.toml"),
         PathBuf::from("PROMPT_plan.md"),
@@ -26,8 +51,8 @@ pub fn config_files() -> Vec<PathBuf> {
     ]
 }
 
-/// Determine which files to remove based on existence
-pub fn files_to_clean<E>(all: bool, exists: E) -> Vec<PathBuf>
+/// Determines which files to remove based on existence.
+fn files_to_clean<E>(all: bool, exists: E) -> Vec<PathBuf>
 where
     E: Fn(&Path) -> bool,
 {
@@ -38,8 +63,8 @@ where
     files.into_iter().filter(|f| exists(f)).collect()
 }
 
-/// Remove files and return list of removed paths
-pub fn clean_files<E, R>(all: bool, exists: E, mut remove: R) -> Result<Vec<PathBuf>>
+/// Removes files and returns list of removed paths.
+fn clean_files<E, R>(all: bool, exists: E, mut remove: R) -> Result<Vec<PathBuf>>
 where
     E: Fn(&Path) -> bool,
     R: FnMut(&Path) -> Result<()>,
@@ -55,8 +80,8 @@ where
     Ok(removed)
 }
 
-/// Format the clean results as a displayable string
-pub fn format_results(removed: &[PathBuf]) -> String {
+/// Formats the clean results as a displayable string.
+fn format_results(removed: &[PathBuf]) -> String {
     let mut out = String::new();
     if removed.is_empty() {
         writeln!(&mut out, "\n{} No Ralph files found to clean.", "ℹ".blue()).unwrap();
@@ -75,22 +100,9 @@ pub fn format_results(removed: &[PathBuf]) -> String {
     out
 }
 
-/// Entry point: runs clean with real filesystem
-pub async fn run(all: bool) -> Result<()> {
-    let cwd = std::env::current_dir().context("Failed to get current directory")?;
-
-    let removed = clean_files(
-        all,
-        |path| cwd.join(path).exists(),
-        |path| {
-            fs::remove_file(cwd.join(path))
-                .with_context(|| format!("Failed to remove {}", path.display()))
-        },
-    )?;
-
-    print!("{}", format_results(&removed));
-    Ok(())
-}
+// -----------------------------------------------------------------------------
+// Tests
+// -----------------------------------------------------------------------------
 
 #[cfg(test)]
 mod tests {

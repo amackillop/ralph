@@ -9,15 +9,47 @@ use std::fmt::Write;
 
 use crate::state::RalphState;
 
-/// Result of a cancel operation
+// -----------------------------------------------------------------------------
+// Public API
+// -----------------------------------------------------------------------------
+
+/// Runs the cancel command, deactivating any active loop.
+pub(crate) fn run() -> Result<()> {
+    let cwd = std::env::current_dir().context("Failed to get current directory")?;
+
+    let state = RalphState::load(&cwd)?;
+    let (result, updated_state) = cancel_loop(state);
+
+    // Save if we have updated state
+    if let Some(s) = updated_state
+        && matches!(result, CancelResult::Cancelled { .. })
+    {
+        s.save(&cwd)?;
+    }
+
+    print!("{}", format_result(&result));
+    Ok(())
+}
+
+// -----------------------------------------------------------------------------
+// Internal types
+// -----------------------------------------------------------------------------
+
+/// Result of a cancel operation.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub enum CancelResult {
+enum CancelResult {
+    /// Loop was successfully cancelled.
     Cancelled { iteration: u32 },
+    /// No active loop was found.
     NoActiveLoop,
 }
 
-/// Pure cancel logic: if state is active, deactivate it
-pub fn cancel_loop(state: Option<RalphState>) -> (CancelResult, Option<RalphState>) {
+// -----------------------------------------------------------------------------
+// Helper functions
+// -----------------------------------------------------------------------------
+
+/// Pure cancel logic: if state is active, deactivate it.
+fn cancel_loop(state: Option<RalphState>) -> (CancelResult, Option<RalphState>) {
     match state {
         Some(mut s) if s.active => {
             let iteration = s.iteration;
@@ -29,8 +61,8 @@ pub fn cancel_loop(state: Option<RalphState>) -> (CancelResult, Option<RalphStat
     }
 }
 
-/// Format the cancel result as a displayable string
-pub fn format_result(result: &CancelResult) -> String {
+/// Formats the cancel result as a displayable string.
+fn format_result(result: &CancelResult) -> String {
     let mut out = String::new();
     match result {
         CancelResult::Cancelled { iteration } => {
@@ -49,23 +81,9 @@ pub fn format_result(result: &CancelResult) -> String {
     out
 }
 
-/// Entry point: runs cancel with real filesystem
-pub async fn run() -> Result<()> {
-    let cwd = std::env::current_dir().context("Failed to get current directory")?;
-
-    let state = RalphState::load(&cwd)?;
-    let (result, updated_state) = cancel_loop(state);
-
-    // Save if we have updated state
-    if let Some(s) = updated_state {
-        if matches!(result, CancelResult::Cancelled { .. }) {
-            s.save(&cwd)?;
-        }
-    }
-
-    print!("{}", format_result(&result));
-    Ok(())
-}
+// -----------------------------------------------------------------------------
+// Tests
+// -----------------------------------------------------------------------------
 
 #[cfg(test)]
 mod tests {
@@ -137,7 +155,7 @@ mod tests {
         let result = CancelResult::Cancelled { iteration: 5 };
         let output = format_result(&result);
         assert!(output.contains("cancelled"));
-        assert!(output.contains("5"));
+        assert!(output.contains('5'));
     }
 
     #[test]

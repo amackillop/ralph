@@ -9,16 +9,34 @@ use std::fmt::Write;
 
 use crate::state::RalphState;
 
-/// Formatted status output for display
+// -----------------------------------------------------------------------------
+// Public API
+// -----------------------------------------------------------------------------
+
+/// Runs the status command, displaying current loop state.
+pub(crate) fn run() -> Result<()> {
+    let cwd = std::env::current_dir().context("Failed to get current directory")?;
+
+    let status = RalphState::load(&cwd)?.map(|s| StatusDisplay::from(&s));
+    print!("{}", format_status_colored(status.as_ref()));
+
+    Ok(())
+}
+
+// -----------------------------------------------------------------------------
+// Internal types
+// -----------------------------------------------------------------------------
+
+/// Formatted status output for display.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct StatusDisplay {
-    pub active: bool,
-    pub mode: String,
-    pub iteration: u32,
-    pub max_iterations: Option<u32>,
-    pub promise: Option<String>,
-    pub started_at: String,
-    pub last_iteration_at: Option<String>,
+struct StatusDisplay {
+    active: bool,
+    mode: String,
+    iteration: u32,
+    max_iterations: Option<u32>,
+    promise: Option<String>,
+    started_at: String,
+    last_iteration_at: Option<String>,
 }
 
 impl From<&RalphState> for StatusDisplay {
@@ -37,105 +55,94 @@ impl From<&RalphState> for StatusDisplay {
     }
 }
 
-/// Format status for terminal output (plain text, testable)
-/// Used in tests; available for non-TTY output scenarios
+// -----------------------------------------------------------------------------
+// Helper functions
+// -----------------------------------------------------------------------------
+
+/// Formats status for terminal output (plain text, testable).
 #[allow(dead_code)]
-pub fn format_status(status: Option<&StatusDisplay>) -> String {
+fn format_status(status: Option<&StatusDisplay>) -> String {
     let mut out = String::new();
-    match status {
-        Some(s) => {
-            writeln!(
-                &mut out,
-                "  Status:     {}",
-                if s.active { "active" } else { "inactive" }
-            )
-            .unwrap();
-            writeln!(&mut out, "  Mode:       {}", s.mode).unwrap();
-            writeln!(&mut out, "  Iteration:  {}", s.iteration).unwrap();
-            writeln!(
-                &mut out,
-                "  Max:        {}",
-                s.max_iterations
-                    .map(|n| n.to_string())
-                    .unwrap_or_else(|| "unlimited".to_string())
-            )
-            .unwrap();
-            writeln!(
-                &mut out,
-                "  Promise:    {}",
-                s.promise.as_deref().unwrap_or("none")
-            )
-            .unwrap();
-            writeln!(&mut out, "  Started:    {}", s.started_at).unwrap();
-            if let Some(ref last) = s.last_iteration_at {
-                writeln!(&mut out, "  Last iter:  {}", last).unwrap();
-            }
+    if let Some(s) = status {
+        writeln!(
+            &mut out,
+            "  Status:     {}",
+            if s.active { "active" } else { "inactive" }
+        )
+        .unwrap();
+        writeln!(&mut out, "  Mode:       {}", s.mode).unwrap();
+        writeln!(&mut out, "  Iteration:  {}", s.iteration).unwrap();
+        writeln!(
+            &mut out,
+            "  Max:        {}",
+            s.max_iterations
+                .map_or_else(|| "unlimited".to_string(), |n| n.to_string())
+        )
+        .unwrap();
+        writeln!(
+            &mut out,
+            "  Promise:    {}",
+            s.promise.as_deref().unwrap_or("none")
+        )
+        .unwrap();
+        writeln!(&mut out, "  Started:    {}", s.started_at).unwrap();
+        if let Some(ref last) = s.last_iteration_at {
+            writeln!(&mut out, "  Last iter:  {last}").unwrap();
         }
-        None => {
-            writeln!(&mut out, "No active Ralph loop found.").unwrap();
-            writeln!(&mut out, "Run 'ralph loop' to start one.").unwrap();
-        }
+    } else {
+        writeln!(&mut out, "No active Ralph loop found.").unwrap();
+        writeln!(&mut out, "Run 'ralph loop' to start one.").unwrap();
     }
     out
 }
 
-/// Format status with colors for terminal display
-pub fn format_status_colored(status: Option<&StatusDisplay>) -> String {
+/// Formats status with colors for terminal display.
+fn format_status_colored(status: Option<&StatusDisplay>) -> String {
     let mut out = String::new();
-    match status {
-        Some(s) => {
-            writeln!(&mut out, "\n{}", "━".repeat(50).dimmed()).unwrap();
-            writeln!(&mut out, "{}", "   🔄 Ralph Loop Status".yellow().bold()).unwrap();
-            writeln!(&mut out, "{}", "━".repeat(50).dimmed()).unwrap();
+    if let Some(s) = status {
+        writeln!(&mut out, "\n{}", "━".repeat(50).dimmed()).unwrap();
+        writeln!(&mut out, "{}", "   🔄 Ralph Loop Status".yellow().bold()).unwrap();
+        writeln!(&mut out, "{}", "━".repeat(50).dimmed()).unwrap();
 
-            let active_str = if s.active {
-                "active".green().bold().to_string()
-            } else {
-                "inactive".red().to_string()
-            };
-            writeln!(&mut out, "  Status:     {}", active_str).unwrap();
-            writeln!(&mut out, "  Mode:       {}", s.mode.cyan()).unwrap();
-            writeln!(&mut out, "  Iteration:  {}", s.iteration.to_string().cyan()).unwrap();
-            writeln!(
-                &mut out,
-                "  Max:        {}",
-                s.max_iterations
-                    .map(|n| n.to_string())
-                    .unwrap_or_else(|| "unlimited".to_string())
-                    .cyan()
-            )
-            .unwrap();
-            writeln!(
-                &mut out,
-                "  Promise:    {}",
-                s.promise.as_deref().unwrap_or("none").cyan()
-            )
-            .unwrap();
-            writeln!(&mut out, "  Started:    {}", s.started_at.cyan()).unwrap();
+        let active_str = if s.active {
+            "active".green().bold().to_string()
+        } else {
+            "inactive".red().to_string()
+        };
+        writeln!(&mut out, "  Status:     {active_str}").unwrap();
+        writeln!(&mut out, "  Mode:       {}", s.mode.cyan()).unwrap();
+        writeln!(&mut out, "  Iteration:  {}", s.iteration.to_string().cyan()).unwrap();
+        writeln!(
+            &mut out,
+            "  Max:        {}",
+            s.max_iterations
+                .map_or_else(|| "unlimited".to_string(), |n| n.to_string())
+                .cyan()
+        )
+        .unwrap();
+        writeln!(
+            &mut out,
+            "  Promise:    {}",
+            s.promise.as_deref().unwrap_or("none").cyan()
+        )
+        .unwrap();
+        writeln!(&mut out, "  Started:    {}", s.started_at.cyan()).unwrap();
 
-            if let Some(ref last) = s.last_iteration_at {
-                writeln!(&mut out, "  Last iter:  {}", last.cyan()).unwrap();
-            }
-
-            writeln!(&mut out, "{}", "━".repeat(50).dimmed()).unwrap();
+        if let Some(ref last) = s.last_iteration_at {
+            writeln!(&mut out, "  Last iter:  {}", last.cyan()).unwrap();
         }
-        None => {
-            writeln!(&mut out, "\n{} No active Ralph loop found.", "ℹ".blue()).unwrap();
-            writeln!(&mut out, "  Run {} to start one.", "ralph loop".green()).unwrap();
-        }
+
+        writeln!(&mut out, "{}", "━".repeat(50).dimmed()).unwrap();
+    } else {
+        writeln!(&mut out, "\n{} No active Ralph loop found.", "ℹ".blue()).unwrap();
+        writeln!(&mut out, "  Run {} to start one.", "ralph loop".green()).unwrap();
     }
     out
 }
 
-/// Entry point: runs status with real filesystem
-pub async fn run() -> Result<()> {
-    let cwd = std::env::current_dir().context("Failed to get current directory")?;
-
-    let status = RalphState::load(&cwd)?.map(|s| StatusDisplay::from(&s));
-    print!("{}", format_status_colored(status.as_ref()));
-
-    Ok(())
-}
+// -----------------------------------------------------------------------------
+// Tests
+// -----------------------------------------------------------------------------
 
 #[cfg(test)]
 mod tests {
@@ -178,7 +185,7 @@ mod tests {
         let output = format_status(Some(&status));
         assert!(output.contains("active"));
         assert!(output.contains("Build"));
-        assert!(output.contains("3"));
+        assert!(output.contains('3'));
         assert!(output.contains("20"));
         assert!(output.contains("COMPLETE"));
         assert!(output.contains("12:05:00"));

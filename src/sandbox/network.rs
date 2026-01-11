@@ -1,7 +1,9 @@
-/// Network policy for sandbox
+//! Network policy definitions for sandbox containers.
+
+/// Network access policy for sandbox containers.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 #[allow(dead_code)]
-pub enum NetworkPolicy {
+pub(crate) enum NetworkPolicy {
     /// Allow all network access
     #[default]
     AllowAll,

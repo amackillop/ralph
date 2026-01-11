@@ -3,29 +3,30 @@
 #![allow(dead_code)]
 
 use anyhow::{Context, Result};
+use bollard::Docker;
 use bollard::container::{
     Config as ContainerConfig, CreateContainerOptions, LogOutput, RemoveContainerOptions,
 };
 use bollard::exec::{CreateExecOptions, StartExecResults};
-use bollard::Docker;
 use futures_util::StreamExt;
 use std::path::Path;
 use tracing::{debug, info, warn};
 
 use crate::config::Config;
 
-/// Runs Cursor inside a Docker container for isolation
-pub struct SandboxRunner {
+/// Runs agents inside a Docker container for isolation.
+pub(crate) struct SandboxRunner {
     config: Config,
 }
 
 impl SandboxRunner {
-    pub fn new(config: Config) -> Self {
+    /// Creates a new sandbox runner with the given configuration.
+    pub(crate) fn new(config: Config) -> Self {
         Self { config }
     }
 
-    /// Run Cursor in a sandboxed container
-    pub async fn run(&self, project_dir: &Path, prompt: &str) -> Result<String> {
+    /// Runs the agent in a sandboxed container.
+    pub(crate) async fn run(&self, project_dir: &Path, prompt: &str) -> Result<String> {
         info!("Running Cursor in Docker sandbox");
 
         let docker = Docker::connect_with_local_defaults()
@@ -133,6 +134,7 @@ impl SandboxRunner {
             host_config: Some(bollard::service::HostConfig {
                 binds: Some(binds),
                 memory: Some(memory),
+                #[allow(clippy::cast_possible_truncation)]
                 nano_cpus: Some((cpus * 1_000_000_000.0) as i64),
                 dns: Some(sandbox.network.dns.clone()),
                 ..Default::default()
@@ -215,7 +217,7 @@ impl SandboxRunner {
 fn expand_path(path: &str) -> Result<String> {
     if path.starts_with("~/") {
         let home = dirs::home_dir().context("Could not determine home directory")?;
-        Ok(path.replacen("~", home.to_str().unwrap(), 1))
+        Ok(path.replacen('~', home.to_str().unwrap(), 1))
     } else {
         Ok(path.to_string())
     }
@@ -256,7 +258,7 @@ mod tests {
 
     #[test]
     fn test_parse_memory_limit_bytes() {
-        assert_eq!(parse_memory_limit("1073741824").unwrap(), 1073741824);
+        assert_eq!(parse_memory_limit("1073741824").unwrap(), 1_073_741_824);
     }
 
     #[test]
@@ -284,11 +286,11 @@ mod tests {
     fn test_expand_path_tilde() {
         if dirs::home_dir().is_some() {
             let expanded = expand_path("~/.ssh").unwrap();
-            assert!(!expanded.starts_with("~"));
+            assert!(!expanded.starts_with('~'));
             assert!(expanded.ends_with("/.ssh"));
 
             let expanded = expand_path("~/Documents/code").unwrap();
-            assert!(!expanded.starts_with("~"));
+            assert!(!expanded.starts_with('~'));
             assert!(expanded.ends_with("/Documents/code"));
         }
     }

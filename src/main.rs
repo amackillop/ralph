@@ -1,6 +1,31 @@
+//! Ralph - Iterative AI development loops using the Ralph Wiggum technique.
+//!
+//! Ralph orchestrates AI agents (Cursor, Claude) in iterative development loops,
+//! enabling autonomous code generation with configurable completion detection,
+//! iteration limits, and optional Docker sandboxing.
+//!
+//! # Usage
+//!
+//! ```bash
+//! # Initialize a new project
+//! ralph init
+//!
+//! # Start a planning loop
+//! ralph loop plan
+//!
+//! # Start a build loop with max iterations
+//! ralph loop build --max-iterations 10
+//!
+//! # Check status
+//! ralph status
+//!
+//! # Cancel an active loop
+//! ralph cancel
+//! ```
+
 use anyhow::Result;
 use clap::{Parser, Subcommand};
-use tracing_subscriber::{fmt, prelude::*, EnvFilter};
+use tracing_subscriber::{EnvFilter, fmt, prelude::*};
 
 mod agent;
 mod commands;
@@ -98,7 +123,7 @@ async fn main() -> Result<()> {
 
     match cli.command {
         Commands::Init { force } => {
-            commands::init::run(force).await?;
+            commands::init::run(force)?;
         }
         Commands::Loop {
             mode,
@@ -111,16 +136,16 @@ async fn main() -> Result<()> {
                 .await?;
         }
         Commands::Status => {
-            commands::status::run().await?;
+            commands::status::run()?;
         }
         Commands::Cancel => {
-            commands::cancel::run().await?;
+            commands::cancel::run()?;
         }
         Commands::Revert { last } => {
             commands::revert::run(last).await?;
         }
         Commands::Clean { all } => {
-            commands::clean::run(all).await?;
+            commands::clean::run(all)?;
         }
     }
 

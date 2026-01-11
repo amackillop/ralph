@@ -1,3 +1,8 @@
+//! CLI command implementations.
+//!
+//! Each submodule implements a Ralph CLI command with pure core logic
+//! separated from IO for testability.
+
 pub mod cancel;
 pub mod clean;
 pub mod init;
