@@ -2,7 +2,7 @@
 
 ## Overview
 
-cursor-ralph supports multiple AI agent CLIs to execute each iteration of the Ralph loop.
+ralph supports multiple AI agent CLIs to execute each iteration of the Ralph loop.
 
 ## Supported Agents
 
@@ -22,6 +22,7 @@ provider = "cursor"
 [agent.cursor]
 path = "agent"           # Default ("cursor-agent" on NixOS)
 output_format = "text"
+sandbox = "disabled"     # Required for shell access (cargo test, git, etc.)
 ```
 
 ### 2. Claude Code CLI
@@ -51,7 +52,7 @@ Provider trait in `src/agent/mod.rs`:
 
 ## Environments
 
-1. **Cursor Editor** - Run `cursor-ralph loop` in terminal
+1. **Cursor Editor** - Run `ralph loop` in terminal
 2. **Headless/CLI** - Print mode for automation
 3. **Git Worktrees** - Isolated state per worktree
 4. **Cloud Agents** - API-based (future)
@@ -62,4 +63,5 @@ Provider trait in `src/agent/mod.rs`:
 - [x] Claude Code support
 - [x] Configurable paths
 - [x] Clear error messages
-- [ ] Sandbox integration with multi-provider
+- [x] Provider CLI override (`--provider` flag)
+- [x] Sandbox integration with multi-provider

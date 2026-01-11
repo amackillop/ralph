@@ -27,6 +27,12 @@ pub(crate) struct Config {
     /// Completion detection settings.
     #[serde(default)]
     pub completion: CompletionConfig,
+    /// Monitoring and logging settings.
+    #[serde(default)]
+    pub monitoring: MonitoringConfig,
+    /// Code validation settings.
+    #[serde(default)]
+    pub validation: ValidationConfig,
 }
 
 /// Agent configuration - selects and configures the AI agent CLI.
@@ -83,6 +89,15 @@ pub(crate) struct CursorConfig {
     /// Output format for non-interactive mode
     #[serde(default = "default_output_format")]
     pub output_format: String,
+
+    /// Sandbox mode for cursor-agent.
+    ///
+    /// - `"disabled"`: Disable sandbox (required for autonomous operation with shell access)
+    /// - `"enabled"`: Enable sandbox (restricts shell commands)
+    ///
+    /// Default: `"disabled"` to allow validation commands. Leverage Docker sandbox for more restricted access.
+    #[serde(default = "default_cursor_sandbox")]
+    pub sandbox: String,
 }
 
 impl Default for CursorConfig {
@@ -91,8 +106,13 @@ impl Default for CursorConfig {
             path: default_cursor_path(),
             model: None,
             output_format: default_output_format(),
+            sandbox: default_cursor_sandbox(),
         }
     }
+}
+
+fn default_cursor_sandbox() -> String {
+    "disabled".to_string()
 }
 
 fn default_cursor_path() -> String {
@@ -162,6 +182,12 @@ pub(crate) struct SandboxConfig {
     #[serde(default = "default_image")]
     pub image: String,
 
+    /// Reuse container between iterations for faster startup.
+    /// When enabled, a single container is created at loop start and reused
+    /// for all iterations, then cleaned up at loop end.
+    #[serde(default = "default_false")]
+    pub reuse_container: bool,
+
     /// Additional volume mounts
     #[serde(default)]
     pub mounts: Vec<Mount>,
@@ -180,6 +206,7 @@ impl Default for SandboxConfig {
         Self {
             enabled: true,
             image: default_image(),
+            reuse_container: false,
             mounts: Vec::new(),
             network: NetworkConfig::default(),
             resources: ResourceConfig::default(),
@@ -200,7 +227,7 @@ pub(crate) struct Mount {
 }
 
 /// Network access policy for sandbox containers.
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "kebab-case")]
 pub(crate) enum NetworkPolicy {
     /// Allow all network access.
@@ -301,9 +328,83 @@ impl Default for CompletionConfig {
     }
 }
 
+/// Monitoring and logging configuration.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub(crate) struct MonitoringConfig {
+    /// Path to log file (relative to project root or absolute).
+    #[serde(default = "default_log_file")]
+    pub log_file: String,
+
+    /// Log format: "json" or "text".
+    #[serde(default = "default_log_format")]
+    pub log_format: String,
+
+    /// Show progress during loop execution.
+    #[serde(default = "default_true")]
+    pub show_progress: bool,
+
+    /// Notification configuration.
+    #[serde(default)]
+    pub notifications: NotificationConfig,
+}
+
+impl Default for MonitoringConfig {
+    fn default() -> Self {
+        Self {
+            log_file: default_log_file(),
+            log_format: default_log_format(),
+            show_progress: true,
+            notifications: NotificationConfig::default(),
+        }
+    }
+}
+
+/// Notification configuration for loop completion and errors.
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub(crate) struct NotificationConfig {
+    /// Webhook URL to POST to on completion (optional).
+    #[serde(default)]
+    pub on_complete: Option<String>,
+
+    /// Notification method on error: "webhook:<url>", "desktop", "sound", or "none".
+    #[serde(default)]
+    pub on_error: Option<String>,
+}
+
+/// Code validation configuration.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub(crate) struct ValidationConfig {
+    /// Enable code validation after each iteration.
+    #[serde(default = "default_true")]
+    pub enabled: bool,
+
+    /// Validation command to run.
+    /// Can be a single command or a space-separated command with arguments.
+    /// Examples:
+    ///   - "nix flake check" (default, recommended for Nix projects)
+    ///   - "cargo check"
+    ///   - "cargo test"
+    ///   - "./validate.sh"
+    #[serde(default = "default_validation_command")]
+    pub command: String,
+}
+
+impl Default for ValidationConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            command: default_validation_command(),
+        }
+    }
+}
+
 // Default value functions
 fn default_true() -> bool {
     true
+}
+
+fn default_false() -> bool {
+    false
 }
 
 fn default_image() -> String {
@@ -326,6 +427,10 @@ fn default_timeout() -> u32 {
     60
 }
 
+fn default_validation_command() -> String {
+    "nix flake check".to_string()
+}
+
 fn default_protected_branches() -> Vec<String> {
     vec![
         "main".to_string(),
@@ -336,6 +441,14 @@ fn default_protected_branches() -> Vec<String> {
 
 fn default_promise_format() -> String {
     "<promise>{}</promise>".to_string()
+}
+
+fn default_log_file() -> String {
+    ".cursor/ralph.log".to_string()
+}
+
+fn default_log_format() -> String {
+    "json".to_string()
 }
 
 impl Config {
@@ -371,9 +484,13 @@ mod tests {
     fn test_default_config() {
         let config = Config::default();
         assert!(config.sandbox.enabled);
+        assert!(!config.sandbox.reuse_container); // Default is false
         assert!(config.git.auto_push);
         assert!(config.git.protected_branches.contains(&"main".to_string()));
         assert_eq!(config.agent.provider, "cursor");
+        assert_eq!(config.monitoring.log_file, ".cursor/ralph.log");
+        assert_eq!(config.monitoring.log_format, "json");
+        assert!(config.monitoring.show_progress);
     }
 
     #[test]
@@ -408,6 +525,20 @@ auto_push = false
     }
 
     #[test]
+    fn test_parse_monitoring_config() {
+        let toml = r#"
+[monitoring]
+log_file = "custom.log"
+log_format = "text"
+show_progress = false
+"#;
+        let config: Config = toml::from_str(toml).unwrap();
+        assert_eq!(config.monitoring.log_file, "custom.log");
+        assert_eq!(config.monitoring.log_format, "text");
+        assert!(!config.monitoring.show_progress);
+    }
+
+    #[test]
     fn test_cursor_config() {
         let toml = r#"
 [agent]
@@ -421,5 +552,86 @@ model = "gpt-5"
         assert_eq!(config.agent.provider, "cursor");
         assert_eq!(config.agent.cursor.path, "cursor-agent");
         assert_eq!(config.agent.cursor.model, Some("gpt-5".to_string()));
+    }
+
+    #[test]
+    fn test_sandbox_reuse_container_default() {
+        let config = Config::default();
+        assert!(!config.sandbox.reuse_container);
+    }
+
+    #[test]
+    fn test_sandbox_reuse_container_enabled() {
+        let toml = r"
+[sandbox]
+enabled = true
+reuse_container = true
+";
+        let config: Config = toml::from_str(toml).unwrap();
+        assert!(config.sandbox.enabled);
+        assert!(config.sandbox.reuse_container);
+    }
+
+    #[test]
+    fn test_sandbox_reuse_container_disabled() {
+        let toml = r"
+[sandbox]
+enabled = true
+reuse_container = false
+";
+        let config: Config = toml::from_str(toml).unwrap();
+        assert!(config.sandbox.enabled);
+        assert!(!config.sandbox.reuse_container);
+    }
+
+    #[test]
+    fn test_notification_config_default() {
+        let config = Config::default();
+        assert!(config.monitoring.notifications.on_complete.is_none());
+        assert!(config.monitoring.notifications.on_error.is_none());
+    }
+
+    #[test]
+    fn test_notification_config_webhook() {
+        let toml = r#"
+[monitoring.notifications]
+on_complete = "https://hooks.example.com/ralph"
+on_error = "webhook:https://hooks.example.com/error"
+"#;
+        let config: Config = toml::from_str(toml).unwrap();
+        assert_eq!(
+            config.monitoring.notifications.on_complete,
+            Some("https://hooks.example.com/ralph".to_string())
+        );
+        assert_eq!(
+            config.monitoring.notifications.on_error,
+            Some("webhook:https://hooks.example.com/error".to_string())
+        );
+    }
+
+    #[test]
+    fn test_notification_config_desktop() {
+        let toml = r#"
+[monitoring.notifications]
+on_error = "desktop"
+"#;
+        let config: Config = toml::from_str(toml).unwrap();
+        assert_eq!(
+            config.monitoring.notifications.on_error,
+            Some("desktop".to_string())
+        );
+    }
+
+    #[test]
+    fn test_notification_config_sound() {
+        let toml = r#"
+[monitoring.notifications]
+on_error = "sound"
+"#;
+        let config: Config = toml::from_str(toml).unwrap();
+        assert_eq!(
+            config.monitoring.notifications.on_error,
+            Some("sound".to_string())
+        );
     }
 }

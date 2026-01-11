@@ -10,68 +10,57 @@ Located in `src/sandbox/docker.rs`:
 - Creates Docker container with workspace mounted
 - Mounts SSH keys and gitconfig read-only
 - Applies resource limits (CPU, memory)
-- Basic network policy support (allow-all, deny)
+- Network policy support (allow-all, deny, allowlist)
+- Timeout enforcement for container execution
+- Container reuse between iterations
+- Automatic cleanup of orphaned containers
 
-## Improvements Needed
+## Status
 
-### 1. Allowlist Network Policy
+All improvements listed below have been implemented:
 
-The "allowlist" network policy is currently not fully implemented:
+### 1. Allowlist Network Policy ✅
 
-```rust
-NetworkPolicy::Allowlist => {
-    // For allowlist, we'd need to set up iptables rules or use a custom network
-    warn!("Allowlist network policy is not fully implemented yet. Using allow-all.");
-}
-```
+Implemented using iptables rules within the container. The implementation:
+- Sets up iptables rules to block all outbound traffic except DNS and allowed domains
+- Resolves allowed domains to IP addresses and allows traffic to those IPs
+- Requires NET_ADMIN capability for the container
+- Supports common domains (github.com, crates.io, api.anthropic.com, etc.)
 
-**Implementation approach:**
-- Create a custom Docker network with DNS interception
-- Use iptables rules to only allow specified domains
-- Or use a proxy container that filters traffic
+### 2. Docker Image Management ✅
 
-### 2. Docker Image Management
+Commands implemented in `src/commands/image.rs`:
+- `ralph image build` - Builds the sandbox image from Dockerfile
+- `ralph image pull` - Pulls pre-built image from registry
+- `ralph image status` - Shows image status and information
 
-Add commands to manage the sandbox Docker image:
+### 3. Container Lifecycle ✅
 
-```bash
-# Build the sandbox image
-cursor-ralph image build
+All improvements implemented:
+- Container reuse between iterations (faster startup via persistent containers)
+- Automatic cleanup of orphaned containers on startup
+- Container logs available on error
 
-# Pull pre-built image
-cursor-ralph image pull
+### 4. Timeout Enforcement ✅
 
-# Show image status
-cursor-ralph image status
-```
+Timeout enforcement implemented:
+- Timeout applied to container execution
+- Container is killed on timeout
+- Timeout errors are logged and reported
 
-### 3. Container Lifecycle
+## Acceptance Criteria (All Met ✅)
 
-Improve container management:
-- Reuse containers between iterations (faster startup)
-- Clean up orphaned containers on startup
-- Show container logs on error
-
-### 4. Timeout Enforcement
-
-Currently `timeout_minutes` is defined but not enforced:
-- Add timeout to container execution
-- Graceful shutdown on timeout
-- Report timeout in status
-
-## Acceptance Criteria
-
-1. Allowlist network policy works with at least 5 common domains
-2. `cursor-ralph image build` creates working sandbox image
-3. Container cleanup happens automatically
-4. Timeout kills runaway containers
+1. ✅ Allowlist network policy works with at least 5 common domains
+2. ✅ `ralph image build` creates working sandbox image
+3. ✅ Container cleanup happens automatically
+4. ✅ Timeout kills runaway containers
 
 ## Configuration
 
 ```toml
 [sandbox]
 enabled = true
-image = "cursor-ralph:latest"
+image = "ralph:latest"
 reuse_container = true  # NEW: reuse between iterations
 
 [sandbox.network]

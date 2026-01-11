@@ -25,7 +25,7 @@ Real-time progress during loop execution:
 
 ### 2. Status Command Enhancement
 
-`cursor-ralph status` should show:
+`ralph status` should show:
 - Current iteration and elapsed time
 - Recent commit messages
 - Error count and last error
@@ -40,17 +40,17 @@ Write structured logs to `.cursor/ralph.log`:
 {"ts":"2024-01-15T10:38:00Z","iteration":15,"event":"complete","commit":"abc123"}
 ```
 
-### 4. Notification Hooks (Future)
+### 4. Notification Hooks ✅
 
 On completion or error:
-- Webhook POST
-- Desktop notification
-- Sound alert
+- Webhook POST ✅
+- Desktop notification ✅
+- Sound alert ✅
 
 ## Acceptance Criteria
 
 1. Progress shows during loop execution
-2. `cursor-ralph status` shows meaningful information
+2. `ralph status` shows meaningful information
 3. Log file captures iteration history
 4. Errors are reported clearly without stopping the loop
 
@@ -62,8 +62,7 @@ log_file = ".cursor/ralph.log"
 log_format = "json"  # or "text"
 show_progress = true
 
-# Future
 [monitoring.notifications]
-on_complete = "https://hooks.example.com/ralph"
-on_error = "desktop"
+on_complete = "https://hooks.example.com/ralph"  # Webhook URL for completion
+on_error = "desktop"  # Options: "webhook:<url>", "desktop", "sound", or "none"
 ```

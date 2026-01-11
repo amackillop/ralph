@@ -231,6 +231,31 @@ protected_branches = ["main", "master", "production"]
 promise_format = "<promise>{}</promise>"
 ```
 
+### Code Validation
+
+Ralph can automatically validate code after each agent iteration to catch compilation errors and test failures:
+
+```toml
+[validation]
+# Enable code validation after each iteration
+# If disabled, the loop relies entirely on the agent to validate code
+enabled = true
+
+# Validation command to run
+# Can be a single command or space-separated command with arguments
+# Examples:
+#   - "nix flake check" (default, recommended for Nix projects)
+#   - "cargo check"
+#   - "cargo test"
+#   - "./validate.sh"
+command = "nix flake check"
+```
+
+When validation fails:
+- Error is logged and a notification is sent (if configured)
+- Loop continues (agent can fix the issue in the next iteration)
+- State tracks the validation error for `ralph status`
+
 ### Supported AI Agents
 
 #### Cursor (default)
@@ -458,7 +483,7 @@ If you see Docker connection errors:
 sudo systemctl start docker
 
 # Or disable sandbox
-cursor-ralph loop build --no-sandbox
+ralph loop build --no-sandbox
 ```
 
 ### Loop Running Forever

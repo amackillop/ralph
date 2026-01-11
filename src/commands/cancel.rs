@@ -21,10 +21,10 @@ pub(crate) fn run() -> Result<()> {
     let (result, updated_state) = cancel_loop(state);
 
     // Save if we have updated state
-    if let Some(s) = updated_state
-        && matches!(result, CancelResult::Cancelled { .. })
-    {
-        s.save(&cwd)?;
+    if let Some(s) = updated_state {
+        if matches!(result, CancelResult::Cancelled { .. }) {
+            s.save(&cwd)?;
+        }
     }
 
     print!("{}", format_result(&result));
@@ -100,6 +100,8 @@ mod tests {
             completion_promise: None,
             started_at: Utc::now(),
             last_iteration_at: None,
+            error_count: 0,
+            last_error: None,
         }
     }
 
@@ -138,6 +140,8 @@ mod tests {
             completion_promise: Some("DONE".to_string()),
             started_at: Utc::now(),
             last_iteration_at: Some(Utc::now()),
+            error_count: 0,
+            last_error: None,
         };
 
         let (_, updated) = cancel_loop(Some(state.clone()));

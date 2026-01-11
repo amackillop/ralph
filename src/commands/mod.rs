@@ -5,6 +5,7 @@
 
 pub mod cancel;
 pub mod clean;
+pub mod image;
 pub mod init;
 pub mod loop_cmd;
 pub mod revert;

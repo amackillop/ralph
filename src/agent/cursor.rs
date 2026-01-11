@@ -39,13 +39,19 @@ impl AgentProvider for CursorProvider {
         debug!("Project dir: {}", project_dir.display());
 
         // Build command arguments for print mode
-        // agent -p "prompt" [--model "model"] --output-format text
+        // agent -p "prompt" [--model "model"] [--sandbox mode] --output-format text
         let mut args = vec!["-p".to_string(), prompt.to_string()];
 
         // Add model if configured
         if let Some(ref model) = self.config.model {
             args.push("--model".to_string());
             args.push(model.clone());
+        }
+
+        // Add sandbox mode (disabled by default to allow shell access for validation)
+        if !self.config.sandbox.is_empty() {
+            args.push("--sandbox".to_string());
+            args.push(self.config.sandbox.clone());
         }
 
         // Add output format

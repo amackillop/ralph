@@ -41,6 +41,12 @@ pub(crate) struct RalphState {
     pub started_at: DateTime<Utc>,
     /// When the last iteration completed.
     pub last_iteration_at: Option<DateTime<Utc>>,
+    /// Total number of recoverable errors encountered.
+    #[serde(default)]
+    pub error_count: u32,
+    /// Last error message encountered (if any).
+    #[serde(default)]
+    pub last_error: Option<String>,
 }
 
 impl Default for RalphState {
@@ -53,6 +59,8 @@ impl Default for RalphState {
             completion_promise: None,
             started_at: Utc::now(),
             last_iteration_at: None,
+            error_count: 0,
+            last_error: None,
         }
     }
 }
@@ -134,6 +142,8 @@ mod tests {
             completion_promise: Some("DONE".to_string()),
             started_at: Utc::now(),
             last_iteration_at: Some(Utc::now()),
+            error_count: 0,
+            last_error: None,
         }
     }
 
@@ -150,6 +160,8 @@ mod tests {
         assert_eq!(loaded.iteration, state.iteration);
         assert_eq!(loaded.max_iterations, state.max_iterations);
         assert_eq!(loaded.completion_promise, state.completion_promise);
+        assert_eq!(loaded.error_count, state.error_count);
+        assert_eq!(loaded.last_error, state.last_error);
     }
 
     #[test]
@@ -225,6 +237,8 @@ mod tests {
         assert!(state.max_iterations.is_none());
         assert!(state.completion_promise.is_none());
         assert!(state.last_iteration_at.is_none());
+        assert_eq!(state.error_count, 0);
+        assert!(state.last_error.is_none());
     }
 
     #[test]
@@ -254,5 +268,45 @@ mod tests {
         // Should have created .cursor directory
         assert!(dir.path().join(".cursor").exists());
         assert!(dir.path().join(".cursor/ralph-state.toml").exists());
+    }
+
+    #[test]
+    fn test_state_with_errors() {
+        let dir = tempdir().unwrap();
+        let state = RalphState {
+            active: true,
+            mode: Mode::Build,
+            iteration: 5,
+            max_iterations: Some(10),
+            completion_promise: None,
+            started_at: Utc::now(),
+            last_iteration_at: Some(Utc::now()),
+            error_count: 3,
+            last_error: Some("Test error".to_string()),
+        };
+
+        state.save(dir.path()).unwrap();
+        let loaded = RalphState::load(dir.path()).unwrap().unwrap();
+
+        assert_eq!(loaded.error_count, 3);
+        assert_eq!(loaded.last_error, Some("Test error".to_string()));
+    }
+
+    #[test]
+    fn test_state_backward_compatibility() {
+        // Test that old state files without error fields can still be loaded
+        // Note: DateTime values must be quoted as strings for TOML deserialization
+        let old_state_toml = r#"
+active = true
+mode = "build"
+iteration = 5
+max_iterations = 10
+started_at = "2024-01-01T12:00:00Z"
+last_iteration_at = "2024-01-01T12:05:00Z"
+"#;
+
+        let state: RalphState = toml::from_str(old_state_toml).unwrap();
+        assert_eq!(state.error_count, 0); // Should default to 0
+        assert!(state.last_error.is_none()); // Should default to None
     }
 }

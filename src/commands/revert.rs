@@ -2,7 +2,7 @@
 //!
 //! Core validation is pure. Git operations are injected.
 
-use anyhow::{Context, Result, bail};
+use anyhow::{bail, Context, Result};
 use colored::Colorize;
 use std::path::PathBuf;
 use tracing::info;
@@ -42,12 +42,6 @@ pub(crate) async fn run(count: u32) -> Result<()> {
 enum RevertError {
     #[error("count must be greater than 0")]
     InvalidCount,
-    #[error("failed to get git log")]
-    #[allow(dead_code)]
-    GitLogFailed,
-    #[error("git reset failed: {0}")]
-    #[allow(dead_code)]
-    GitResetFailed(String),
 }
 
 // -----------------------------------------------------------------------------
@@ -203,10 +197,6 @@ mod tests {
         assert_eq!(
             RevertError::InvalidCount.to_string(),
             "count must be greater than 0"
-        );
-        assert_eq!(
-            RevertError::GitResetFailed("error msg".to_string()).to_string(),
-            "git reset failed: error msg"
         );
     }
 

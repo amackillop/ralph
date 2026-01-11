@@ -14,6 +14,8 @@ RUN apt-get update && apt-get install -y \
     gnupg \
     lsb-release \
     sudo \
+    iptables \
+    dnsutils \
     && rm -rf /var/lib/apt/lists/*
 
 # Install Node.js (commonly needed for many projects)

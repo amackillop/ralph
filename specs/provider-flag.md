@@ -36,7 +36,7 @@ ralph loop build --provider cursor
 
 ## Acceptance Criteria
 
-- [ ] `ralph loop --help` shows `--provider` option
-- [ ] `ralph loop build --provider claude` uses Claude regardless of config
-- [ ] `ralph loop build --provider cursor` uses Cursor regardless of config
-- [ ] Default behavior (no flag) unchanged - uses config value
+- [x] `ralph loop --help` shows `--provider` option
+- [x] `ralph loop build --provider claude` uses Claude regardless of config
+- [x] `ralph loop build --provider cursor` uses Cursor regardless of config
+- [x] Default behavior (no flag) unchanged - uses config value
