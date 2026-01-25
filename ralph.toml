@@ -28,7 +28,8 @@ path = "cursor-agent"
 # Model to use (optional)
 # If not set, uses Cursor's default model
 # Examples: "claude-sonnet-4-20250514", "gpt-4o", etc.
-model = "opus-4.5-thinking"
+# model = "opus-4.5-thinking"
+model = "auto"
 
 # Output format for non-interactive (-p) mode
 # Options: "text", "json", "stream-json"
@@ -217,9 +218,10 @@ enabled = true
 # Validation command to run
 # Can be a single command or space-separated command with arguments
 # Examples:
-#   - "nix flake check" (default, recommended for Nix projects)
+#   - "nix flake check --quiet" (default, recommended for Nix projects)
+#   - "nix flake check" (verbose, shows all build output)
 #   - "cargo check"
 #   - "cargo test"
 #   - "./validate.sh"
-# Default: "nix flake check"
-command = "nix flake check"
+# Default: "nix flake check --quiet"
+command = "nix flake check --quiet"

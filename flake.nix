@@ -152,6 +152,93 @@
         packages = {
           default = ralph;
           inherit ralph;
+
+          # Docker image for sandbox - built with Nix for reproducibility
+          # Build: nix build .#dockerImage
+          # Load: docker load < result
+          dockerImage = pkgs.dockerTools.buildImage {
+            name = "ralph";
+            tag = "latest";
+
+            # Copy contents into the image
+            copyToRoot = pkgs.buildEnv {
+              name = "ralph-sandbox-root";
+              paths = with pkgs; [
+                # Base system utilities
+                coreutils
+                bash
+                gnused
+                gnugrep
+                gawk
+                findutils
+                which
+
+                # Networking and security
+                curl
+                cacert
+                gnupg
+
+                # Network policy tools (for allowlist)
+                iptables
+                dnsutils
+
+                # Version control
+                git
+
+                # Node.js v20.x (commonly needed)
+                nodejs_20
+                nodePackages.npm
+
+                # Python 3 with pip
+                python3
+                python3Packages.pip
+                python3Packages.virtualenv
+
+                # Rust toolchain
+                rustup
+                cargo
+                rustc
+
+                # Additional tools
+                jq
+                less
+                ncurses  # for terminal support
+              ];
+              pathsToLink = [ "/bin" "/lib" "/share" "/etc" ];
+            };
+
+            # Container configuration
+            config = {
+              Cmd = [ "/bin/bash" ];
+              WorkingDir = "/workspace";
+              Env = [
+                "PATH=/bin:/usr/bin:/root/.cargo/bin"
+                "SSL_CERT_FILE=/etc/ssl/certs/ca-bundle.crt"
+                "NIX_SSL_CERT_FILE=/etc/ssl/certs/ca-bundle.crt"
+                "HOME=/root"
+              ];
+              Volumes = {
+                "/workspace" = { };
+              };
+            };
+
+            # Run setup commands after image creation
+            runAsRoot = ''
+              #!${pkgs.runtimeShell}
+              mkdir -p /root /workspace /tmp
+
+              # Set git configuration for commits
+              ${pkgs.git}/bin/git config --global user.email "ralph@cursor-ralph.local"
+              ${pkgs.git}/bin/git config --global user.name "Ralph Wiggum"
+
+              # Initialize rustup for the container
+              export HOME=/root
+              export PATH="${pkgs.rustup}/bin:$PATH"
+              mkdir -p /root/.cargo
+              echo '[net]' > /root/.cargo/config.toml
+              echo 'git-fetch-with-cli = true' >> /root/.cargo/config.toml
+            '';
+          };
         };
 
         apps = {

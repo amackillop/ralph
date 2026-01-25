@@ -34,6 +34,50 @@ Commands implemented in `src/commands/image.rs`:
 - `ralph image pull` - Pulls pre-built image from registry
 - `ralph image status` - Shows image status and information
 
+### 5. Nix-Based Image Building ✅
+
+**Status**: Complete
+
+Replace Dockerfile-based image building with Nix-based builds for better reproducibility and integration with the Nix ecosystem.
+
+**Requirements**:
+
+1. **Nix Image Build**:
+   - Add Docker image build to `flake.nix` using `pkgs.dockerTools.buildImage` or similar
+   - Image should include the same dependencies as current Dockerfile:
+     - Base system (Ubuntu or NixOS base)
+     - curl, git, ca-certificates, gnupg, lsb-release, sudo
+     - iptables, dnsutils (for network policy)
+     - Node.js (v20.x)
+     - Python 3 with pip and venv
+     - Rust toolchain (via rustup or Nix)
+     - Cursor CLI placeholder (same as Dockerfile)
+     - Git configuration for commits
+   - Image should be built via `nix build .#dockerImage` or similar
+   - Default `ralph image build` should use Nix build method
+
+2. **Local Image Preference**:
+   - Add configuration option to prefer local images over pulling
+   - When `ralph image pull` is executed:
+     - First check if image exists locally using Docker API
+     - If found locally, skip pull and inform user
+     - If not found locally, proceed with pull from registry
+   - This avoids unnecessary network traffic when image is already available
+
+3. **Dockerfile Deprecation**:
+   - Remove `Dockerfile` from repository
+   - Update `ralph image build` to use Nix by default
+   - Optionally support `--dockerfile` flag for legacy builds (if needed)
+
+**Implementation Notes**:
+- Use `pkgs.dockerTools.buildImage` in `flake.nix` to create the Docker image
+- Image should be loadable into Docker via `docker load < result`
+- Consider adding a flake app: `nix run .#docker-image` to build and load the image
+- Update `src/commands/image.rs` to:
+  - Check for local image existence before pulling
+  - Support Nix-based builds via `nix build` command execution
+  - Tag the Nix-built image appropriately for use by sandbox
+
 ### 3. Container Lifecycle ✅
 
 All improvements implemented:
@@ -48,12 +92,18 @@ Timeout enforcement implemented:
 - Container is killed on timeout
 - Timeout errors are logged and reported
 
-## Acceptance Criteria (All Met ✅)
+## Acceptance Criteria
 
+### Completed ✅
 1. ✅ Allowlist network policy works with at least 5 common domains
 2. ✅ `ralph image build` creates working sandbox image
 3. ✅ Container cleanup happens automatically
 4. ✅ Timeout kills runaway containers
+
+### Completed ✅
+5. ✅ Nix-based image building replaces Dockerfile (in `flake.nix` as `dockerImage` package)
+6. ✅ `ralph image pull` checks for local image before pulling
+7. ✅ Sandbox uses Nix-built image by default (`ralph image build` uses Nix)
 
 ## Configuration
 
@@ -61,7 +111,8 @@ Timeout enforcement implemented:
 [sandbox]
 enabled = true
 image = "ralph:latest"
-reuse_container = true  # NEW: reuse between iterations
+reuse_container = true  # Reuse between iterations
+use_local_image = true  # Prefer local image, skip pull if exists
 
 [sandbox.network]
 policy = "allowlist"
@@ -72,3 +123,6 @@ memory = "8g"
 cpus = "4"
 timeout_minutes = 60
 ```
+
+**Available Configuration Options**:
+- `use_local_image` (boolean): When true, `ralph image pull` will check for local image first and skip pull if found. Default: `true` (recommended to avoid unnecessary network traffic). Use `--force` flag with `ralph image pull` to override.

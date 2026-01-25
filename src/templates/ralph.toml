@@ -42,8 +42,17 @@ verbose = false
 # Enable Docker sandboxing for isolation
 enabled = true
 
-# Docker image to use (build with: docker build -t ralph:latest .)
+# Docker image to use
+# Build with: ralph image build (uses Nix by default)
+# Or legacy: ralph image build --dockerfile Dockerfile
 image = "ralph:latest"
+
+# Reuse container between iterations (faster startup)
+reuse_container = false
+
+# Prefer local image over pulling from registry
+# When true, `ralph image pull` checks for local image first
+use_local_image = true
 
 # Additional volume mounts (read-only by default)
 # mounts = [
@@ -94,9 +103,10 @@ enabled = true
 # Validation command to run
 # Can be a single command or space-separated command with arguments
 # Examples:
-#   - "nix flake check" (default, recommended for Nix projects)
+#   - "nix flake check --quiet" (default, recommended for Nix projects)
+#   - "nix flake check" (verbose, shows all build output)
 #   - "cargo check"
 #   - "cargo test"
 #   - "./validate.sh"
-# Default: "nix flake check"
-command = "nix flake check"
+# Default: "nix flake check --quiet"
+command = "nix flake check --quiet"

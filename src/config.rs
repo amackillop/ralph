@@ -188,6 +188,12 @@ pub(crate) struct SandboxConfig {
     #[serde(default = "default_false")]
     pub reuse_container: bool,
 
+    /// Prefer local image over pulling from registry.
+    /// When true, `ralph image pull` checks for local image first and skips
+    /// pull if already available. This avoids unnecessary network traffic.
+    #[serde(default = "default_true")]
+    pub use_local_image: bool,
+
     /// Additional volume mounts
     #[serde(default)]
     pub mounts: Vec<Mount>,
@@ -207,6 +213,7 @@ impl Default for SandboxConfig {
             enabled: true,
             image: default_image(),
             reuse_container: false,
+            use_local_image: true,
             mounts: Vec::new(),
             network: NetworkConfig::default(),
             resources: ResourceConfig::default(),
@@ -381,7 +388,8 @@ pub(crate) struct ValidationConfig {
     /// Validation command to run.
     /// Can be a single command or a space-separated command with arguments.
     /// Examples:
-    ///   - "nix flake check" (default, recommended for Nix projects)
+    ///   - "nix flake check --quiet" (default, recommended for Nix projects)
+    ///   - "nix flake check" (verbose, shows all build output)
     ///   - "cargo check"
     ///   - "cargo test"
     ///   - "./validate.sh"
@@ -428,7 +436,7 @@ fn default_timeout() -> u32 {
 }
 
 fn default_validation_command() -> String {
-    "nix flake check".to_string()
+    "nix flake check --quiet".to_string()
 }
 
 fn default_protected_branches() -> Vec<String> {
@@ -582,6 +590,33 @@ reuse_container = false
         let config: Config = toml::from_str(toml).unwrap();
         assert!(config.sandbox.enabled);
         assert!(!config.sandbox.reuse_container);
+    }
+
+    #[test]
+    fn test_sandbox_use_local_image_default() {
+        let config = Config::default();
+        // Default should be true to avoid unnecessary network traffic
+        assert!(config.sandbox.use_local_image);
+    }
+
+    #[test]
+    fn test_sandbox_use_local_image_disabled() {
+        let toml = r"
+[sandbox]
+use_local_image = false
+";
+        let config: Config = toml::from_str(toml).unwrap();
+        assert!(!config.sandbox.use_local_image);
+    }
+
+    #[test]
+    fn test_sandbox_use_local_image_enabled() {
+        let toml = r"
+[sandbox]
+use_local_image = true
+";
+        let config: Config = toml::from_str(toml).unwrap();
+        assert!(config.sandbox.use_local_image);
     }
 
     #[test]

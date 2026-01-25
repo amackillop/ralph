@@ -16,11 +16,11 @@ use crate::config::Config;
 /// Image management actions.
 #[derive(Subcommand, Debug)]
 pub enum ImageAction {
-    /// Build the sandbox image from Dockerfile
+    /// Build the sandbox image (Nix by default, --dockerfile for legacy)
     Build {
-        /// Dockerfile path (default: ./Dockerfile)
-        #[arg(long, default_value = "Dockerfile")]
-        dockerfile: String,
+        /// Use Dockerfile instead of Nix (legacy mode)
+        #[arg(long)]
+        dockerfile: Option<String>,
 
         /// Image tag (default: from ralph.toml or "ralph:latest")
         #[arg(long)]
@@ -32,6 +32,10 @@ pub enum ImageAction {
         /// Image name to pull (default: from ralph.toml or "ralph:latest")
         #[arg(long)]
         image: Option<String>,
+
+        /// Force pull even if image exists locally
+        #[arg(long, default_value = "false")]
+        force: bool,
     },
 
     /// Show image status and information
@@ -51,11 +55,17 @@ pub async fn run(action: ImageAction) -> Result<()> {
     match action {
         ImageAction::Build { dockerfile, tag } => {
             let image_tag = tag.unwrap_or_else(|| config.sandbox.image.clone());
-            build_image(&dockerfile, &image_tag, &project_dir).await?;
+            if let Some(dockerfile_path) = dockerfile {
+                // Legacy Dockerfile build
+                build_image_dockerfile(&dockerfile_path, &image_tag, &project_dir).await?;
+            } else {
+                // Default: Nix-based build
+                build_image_nix(&image_tag, &project_dir).await?;
+            }
         }
-        ImageAction::Pull { image } => {
+        ImageAction::Pull { image, force } => {
             let image_name = image.unwrap_or_else(|| config.sandbox.image.clone());
-            pull_image(&image_name).await?;
+            pull_image(&image_name, config.sandbox.use_local_image, force).await?;
         }
         ImageAction::Status { image } => {
             let image_name = image.unwrap_or_else(|| config.sandbox.image.clone());
@@ -66,9 +76,71 @@ pub async fn run(action: ImageAction) -> Result<()> {
     Ok(())
 }
 
-/// Build Docker image from Dockerfile.
-async fn build_image(dockerfile: &str, tag: &str, project_dir: &Path) -> Result<()> {
-    info!("Building Docker image: {}", tag);
+/// Build Docker image using Nix (default, reproducible builds).
+///
+/// Runs `nix build .#dockerImage` and loads the result into Docker.
+async fn build_image_nix(tag: &str, project_dir: &Path) -> Result<()> {
+    info!("Building Docker image with Nix: {}", tag);
+
+    // Step 1: Build the Docker image with Nix
+    info!("Running: nix build .#dockerImage");
+    let nix_build = tokio::process::Command::new("nix")
+        .args(["build", ".#dockerImage", "--no-link", "--print-out-paths"])
+        .current_dir(project_dir)
+        .output()
+        .await
+        .context("Failed to run nix build. Is Nix installed?")?;
+
+    if !nix_build.status.success() {
+        let stderr = String::from_utf8_lossy(&nix_build.stderr);
+        anyhow::bail!("Nix build failed:\n{}", stderr);
+    }
+
+    let image_path = String::from_utf8_lossy(&nix_build.stdout)
+        .trim()
+        .to_string();
+    info!("Nix image built at: {}", image_path);
+
+    // Step 2: Load the image into Docker
+    info!("Loading image into Docker...");
+    let docker_load = tokio::process::Command::new("docker")
+        .args(["load", "-i", &image_path])
+        .current_dir(project_dir)
+        .output()
+        .await
+        .context("Failed to run docker load. Is Docker running?")?;
+
+    if !docker_load.status.success() {
+        let stderr = String::from_utf8_lossy(&docker_load.stderr);
+        anyhow::bail!("Docker load failed:\n{}", stderr);
+    }
+
+    let load_output = String::from_utf8_lossy(&docker_load.stdout);
+    info!("Docker load output: {}", load_output.trim());
+
+    // Step 3: Tag the image if needed (Nix builds as ralph:latest)
+    if tag != "ralph:latest" {
+        info!("Tagging image as: {}", tag);
+        let docker_tag = tokio::process::Command::new("docker")
+            .args(["tag", "ralph:latest", tag])
+            .current_dir(project_dir)
+            .output()
+            .await
+            .context("Failed to tag Docker image")?;
+
+        if !docker_tag.status.success() {
+            let stderr = String::from_utf8_lossy(&docker_tag.stderr);
+            anyhow::bail!("Docker tag failed:\n{}", stderr);
+        }
+    }
+
+    info!("Image built successfully: {}", tag);
+    Ok(())
+}
+
+/// Build Docker image from Dockerfile (legacy mode).
+async fn build_image_dockerfile(dockerfile: &str, tag: &str, project_dir: &Path) -> Result<()> {
+    info!("Building Docker image from Dockerfile: {}", tag);
 
     let docker = Docker::connect_with_local_defaults()
         .context("Failed to connect to Docker. Is Docker running?")?;
@@ -140,10 +212,36 @@ async fn build_image(dockerfile: &str, tag: &str, project_dir: &Path) -> Result<
     Ok(())
 }
 
-/// Pull Docker image from registry.
-async fn pull_image(image: &str) -> Result<()> {
-    info!("Pulling Docker image: {}", image);
+/// Check if a Docker image exists locally.
+async fn image_exists_locally(docker: &Docker, image: &str) -> Result<bool> {
+    let images = docker
+        .list_images(Some(ListImagesOptions::<String> {
+            all: true,
+            ..Default::default()
+        }))
+        .await
+        .context("Failed to list images")?;
 
+    let (name, tag) = parse_image_tag(image);
+
+    let found = images.iter().any(|img| {
+        img.repo_tags.iter().any(|tag_str| {
+            if let Some(colon_pos) = tag_str.rfind(':') {
+                let (n, t) = tag_str.split_at(colon_pos);
+                n == name && &t[1..] == tag
+            } else {
+                tag_str == name && tag == "latest"
+            }
+        })
+    });
+
+    Ok(found)
+}
+
+/// Pull Docker image from registry.
+///
+/// If `use_local_image` is true and image exists locally, skip pull unless forced.
+async fn pull_image(image: &str, use_local_image: bool, force: bool) -> Result<()> {
     let docker = Docker::connect_with_local_defaults()
         .context("Failed to connect to Docker. Is Docker running?")?;
 
@@ -151,6 +249,21 @@ async fn pull_image(image: &str) -> Result<()> {
         .ping()
         .await
         .context("Cannot ping Docker daemon. Is Docker running?")?;
+
+    // Check for local image if configured to prefer local
+    if use_local_image && !force {
+        if image_exists_locally(&docker, image).await? {
+            info!(
+                "Image '{}' found locally. Skipping pull (use --force to override).",
+                image
+            );
+            println!("Image '{}' already exists locally.", image);
+            println!("Use --force to pull anyway.");
+            return Ok(());
+        }
+    }
+
+    info!("Pulling Docker image: {}", image);
 
     let pull_options = CreateImageOptions {
         from_image: image,
@@ -325,6 +438,58 @@ mod tests {
             }
             Err(e) => {
                 // Docker not available - this is acceptable in test environments
+                let error_msg = e.to_string();
+                assert!(
+                    error_msg.contains("Docker") || error_msg.contains("docker"),
+                    "Unexpected error: {error_msg}"
+                );
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn test_image_exists_locally_no_docker() {
+        // This test verifies the function handles Docker unavailability gracefully
+        let docker = Docker::connect_with_local_defaults();
+        match docker {
+            Ok(d) => {
+                // Docker is available, test the function
+                let result = image_exists_locally(&d, "nonexistent:image").await;
+                match result {
+                    Ok(exists) => {
+                        // Image should not exist
+                        assert!(!exists);
+                    }
+                    Err(e) => {
+                        // Docker daemon not running
+                        let error_msg = e.to_string();
+                        assert!(
+                            error_msg.contains("Docker")
+                                || error_msg.contains("docker")
+                                || error_msg.contains("ping"),
+                            "Unexpected error: {error_msg}"
+                        );
+                    }
+                }
+            }
+            Err(_) => {
+                // Docker not available - test passes
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn test_pull_image_local_check_no_docker() {
+        // This test verifies pull respects use_local_image setting
+        // It will gracefully handle Docker unavailability
+        let result = pull_image("nonexistent:image", true, false).await;
+
+        match result {
+            Ok(()) => {
+                // Pull succeeded or found locally - valid
+            }
+            Err(e) => {
+                // Docker not available - acceptable in test environments
                 let error_msg = e.to_string();
                 assert!(
                     error_msg.contains("Docker") || error_msg.contains("docker"),

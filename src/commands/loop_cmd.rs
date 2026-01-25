@@ -25,7 +25,7 @@ use crate::state::{Mode, RalphState};
 #[allow(tail_expr_drop_order, clippy::too_many_lines)] // Drop order doesn't matter for async operations
 pub(crate) async fn run(
     mode: LoopMode,
-    max_iterations: u32,
+    max_iterations: Option<u32>,
     completion_promise: Option<String>,
     no_sandbox: bool,
     custom_prompt: Option<String>,
@@ -94,7 +94,10 @@ pub(crate) async fn run(
                     Some(name)
                 }
                 Err(e) => {
-                    warn!("Failed to create persistent container: {}. Falling back to per-iteration containers.", e);
+                    warn!(
+                        "Failed to create persistent container: {}. Falling back to per-iteration containers.",
+                        e
+                    );
                     None
                 }
             },
@@ -152,8 +155,38 @@ pub(crate) async fn run(
         tracing::info!(event = "iteration_start", iteration = state.iteration,);
 
         // Read prompt
-        let prompt = std::fs::read_to_string(&prompt_file)
+        let mut prompt = std::fs::read_to_string(&prompt_file)
             .with_context(|| format!("Failed to read prompt file: {}", prompt_file.display()))?;
+
+        // Append validation errors from previous iteration if present
+        if let Some(ref last_error) = state.last_error {
+            if last_error.starts_with("Validation error:") {
+                debug!("Appending validation error to prompt for agent visibility");
+
+                // Try to read full error from file
+                let error_file = cwd.join(".cursor").join("validation-error.txt");
+                let error_details = if error_file.exists() {
+                    std::fs::read_to_string(&error_file)
+                        .unwrap_or_else(|_| {
+                            // Fallback to truncated error from state
+                            last_error.strip_prefix("Validation error:").unwrap_or(last_error).to_string()
+                        })
+                } else {
+                    // Fallback to truncated error from state
+                    last_error.strip_prefix("Validation error:").unwrap_or(last_error).to_string()
+                };
+
+                prompt.push_str("\n\n");
+                prompt.push_str("## ⚠️ VALIDATION ERROR FROM PREVIOUS ITERATION\n");
+                prompt.push_str("The following validation error occurred. Please fix it:\n\n");
+                prompt.push_str("```\n");
+                prompt.push_str(error_details.trim());
+                prompt.push_str("\n```\n");
+                prompt.push_str(
+                    "\nFix the issues above and ensure validation passes before proceeding.\n",
+                );
+            }
+        }
 
         // Run agent (in sandbox if enabled, otherwise directly)
         info!(
@@ -184,14 +217,23 @@ pub(crate) async fn run(
         let output = match output_result {
             Ok(out) => out,
             Err(e) => {
-                // Check if this is a timeout error
-                let is_timeout = e.to_string().contains("timed out");
+                let error_msg = e.to_string();
+
+                // Check if this is a recoverable error (timeout, rate limit, etc.)
+                let is_timeout = error_msg.contains("timed out");
+                let is_rate_limit = error_msg.contains("resource_exhausted")
+                    || error_msg.contains("rate limit")
+                    || error_msg.contains("Rate limit")
+                    || error_msg.contains("429")
+                    || error_msg.contains("quota")
+                    || error_msg.contains("Quota");
 
                 // Log error
                 let error_context = serde_json::json!({
                     "iteration": state.iteration,
                     "provider": provider.to_string(),
                     "timeout": is_timeout,
+                    "rate_limit": is_rate_limit,
                 });
                 tracing::error!(
                     event = "error",
@@ -203,21 +245,70 @@ pub(crate) async fn run(
                 // Send error notification
                 let error_details = NotificationDetails::error(
                     Some(state.iteration),
-                    &e.to_string(),
+                    &error_msg,
                     Some(error_context),
                 );
                 notifier
                     .notify(NotificationEvent::Error, &error_details)
                     .await;
 
-                // For timeout errors, continue to next iteration (recoverable error)
-                if is_timeout {
-                    warn!(
-                        "Agent execution timed out: {}. Continuing to next iteration.",
-                        e
-                    );
+                // For recoverable errors (timeout, rate limit), continue to next iteration
+                if is_timeout || is_rate_limit {
+                    let error_type = if is_rate_limit {
+                        "rate limit"
+                    } else {
+                        "timeout"
+                    };
+
+                    // Check if this is a consecutive rate limit error (likely hard cap)
+                    let consecutive_rate_limits = if is_rate_limit {
+                        // Count consecutive rate limit errors in recent iterations
+                        // Check if last error was also a rate limit
+                        state
+                            .last_error
+                            .as_ref()
+                            .map(|e| e.contains("rate limit") || e.contains("resource_exhausted"))
+                            .unwrap_or(false)
+                    } else {
+                        false
+                    };
+
+                    if is_rate_limit {
+                        if consecutive_rate_limits {
+                            // Likely hit a hard cap (daily/hourly quota)
+                            // Use exponential backoff: 30s, 1m, 2m, 5m, 10m
+                            let backoff_seconds = match state.error_count {
+                                0..=1 => 30,
+                                2 => 60,
+                                3 => 120,
+                                4 => 300,
+                                _ => 600, // 10 minutes for 5+ consecutive errors
+                            };
+
+                            warn!(
+                                "Rate limit error (likely daily/hourly quota). Waiting {} seconds before retry...",
+                                backoff_seconds
+                            );
+                            warn!(
+                                "If this persists, you may have hit a hard quota limit. Consider:\n\
+                                 - Waiting several hours before retrying\n\
+                                 - Switching to Claude provider: ralph loop build --provider claude\n\
+                                 - Reducing iteration frequency"
+                            );
+
+                            tokio::time::sleep(std::time::Duration::from_secs(backoff_seconds))
+                                .await;
+                        } else {
+                            // First rate limit error - short delay
+                            info!(
+                                "Waiting 30 seconds before retry to allow rate limit to reset..."
+                            );
+                            tokio::time::sleep(std::time::Duration::from_secs(30)).await;
+                        }
+                    }
+
                     state.error_count += 1;
-                    state.last_error = Some(e.to_string());
+                    state.last_error = Some(format!("Agent {}: {}", error_type, error_msg));
                     state.last_iteration_at = Some(chrono::Utc::now());
                     state.iteration += 1;
                     state.save(&cwd)?;
@@ -242,45 +333,69 @@ pub(crate) async fn run(
 
         // Validate code compiles before proceeding (if enabled)
         if config.validation.enabled {
-            if let Err(e) = validate_code(&cwd, &config.validation.command).await {
-                warn!(
-                    "Code validation failed: {}. Agent should fix this in next iteration.",
-                    e
-                );
-                state.error_count += 1;
-                state.last_error = Some(format!("Validation error: {e}"));
-                state.last_iteration_at = Some(chrono::Utc::now());
-                state.iteration += 1;
-                state.save(&cwd)?;
-
-                // Log validation error
-                let validation_error_context = serde_json::json!({
-                    "iteration": state.iteration - 1,
-                    "error": e.to_string(),
-                });
-                tracing::error!(
-                    event = "error",
-                    iteration = state.iteration - 1,
-                    error = %format!("Code validation failed: {e}"),
-                    ?validation_error_context,
-                );
-
-                // Send error notification
-                let error_details = NotificationDetails::error(
-                    Some(state.iteration - 1),
-                    &format!("Code validation failed: {e}"),
-                    Some(validation_error_context),
-                );
-                notifier
-                    .notify(NotificationEvent::Error, &error_details)
-                    .await;
-
-                // Continue to next iteration (let agent fix it)
-                if config.monitoring.show_progress {
-                    let progress = ProgressInfo::new(&state, &cwd).await;
-                    print!("{}", format_progress(&progress));
+            match validate_code(&cwd, &config.validation.command).await {
+                Ok(()) => {
+                    // Clear validation error if validation now passes (agent fixed it)
+                    if let Some(ref last_error) = state.last_error {
+                        if last_error.starts_with("Validation error:") {
+                            debug!("Validation passed - clearing previous validation error");
+                            state.last_error = None;
+                            // Also remove validation error file if it exists
+                            let error_file = cwd.join(".cursor").join("validation-error.txt");
+                            let _ = std::fs::remove_file(&error_file);
+                        }
+                    }
                 }
-                continue;
+                Err(full_error) => {
+                    warn!("Code validation failed. Agent should fix this in next iteration.");
+
+                    // Write full error to file for agent to read
+                    let error_file = cwd.join(".cursor").join("validation-error.txt");
+                    if let Some(parent) = error_file.parent() {
+                        let _ = std::fs::create_dir_all(parent);
+                    }
+                    let _ = std::fs::write(&error_file, &full_error);
+
+                    // Store reference in state (truncated for display, but full error is in file)
+                    let error_summary: String =
+                        full_error.lines().take(5).collect::<Vec<_>>().join("\n");
+                    state.error_count += 1;
+                    state.last_error = Some(format!(
+                        "Validation error: {error_summary}... (see .cursor/validation-error.txt for full error)"
+                    ));
+                    state.last_iteration_at = Some(chrono::Utc::now());
+                    state.iteration += 1;
+                    state.save(&cwd)?;
+
+                    // Log validation error
+                    let validation_error_context = serde_json::json!({
+                        "iteration": state.iteration - 1,
+                        "error": error_summary.clone(),
+                    });
+                    tracing::error!(
+                        event = "error",
+                        iteration = state.iteration - 1,
+                        error = %format!("Code validation failed"),
+                        ?validation_error_context,
+                    );
+
+                    // Send error notification
+                    let error_details = NotificationDetails::error(
+                        Some(state.iteration - 1),
+                        &format!("Code validation failed: {error_summary}"),
+                        Some(validation_error_context),
+                    );
+                    notifier
+                        .notify(NotificationEvent::Error, &error_details)
+                        .await;
+
+                    // Continue to next iteration (let agent fix it)
+                    if config.monitoring.show_progress {
+                        let progress = ProgressInfo::new(&state, &cwd).await;
+                        print!("{}", format_progress(&progress));
+                    }
+                    continue;
+                }
             }
         }
 
@@ -526,14 +641,10 @@ fn determine_prompt_file(cwd: &Path, mode: LoopMode, custom_prompt: Option<&str>
 /// Prepares state with CLI options.
 fn prepare_state(
     mut state: RalphState,
-    max_iterations: u32,
+    max_iterations: Option<u32>,
     completion_promise: Option<String>,
 ) -> RalphState {
-    state.max_iterations = if max_iterations > 0 {
-        Some(max_iterations)
-    } else {
-        None
-    };
+    state.max_iterations = max_iterations;
     state.completion_promise = completion_promise;
     state.active = true;
     state
@@ -703,12 +814,15 @@ fn format_loop_finished(total_iterations: u32) -> String {
 // -----------------------------------------------------------------------------
 
 /// Validates code by running the configured validation command.
-async fn validate_code(cwd: &Path, command: &str) -> Result<()> {
+/// Returns the full error message if validation fails.
+async fn validate_code(cwd: &Path, command: &str) -> Result<(), String> {
     debug!("Validating code with command: {}", command);
 
     // Parse command into program and args
     let mut parts = command.split_whitespace();
-    let program = parts.next().context("Validation command cannot be empty")?;
+    let program = parts
+        .next()
+        .ok_or_else(|| "Validation command cannot be empty".to_string())?;
     let args: Vec<&str> = parts.collect();
 
     let output = tokio::process::Command::new(program)
@@ -716,7 +830,7 @@ async fn validate_code(cwd: &Path, command: &str) -> Result<()> {
         .args(&args)
         .output()
         .await
-        .with_context(|| format!("Failed to run validation command: {command}"))?;
+        .map_err(|e| format!("Failed to run validation command: {e}"))?;
 
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
@@ -727,10 +841,9 @@ async fn validate_code(cwd: &Path, command: &str) -> Result<()> {
             stderr.to_string()
         };
 
-        // Extract first few lines of error for brevity
-        let error_summary: String = error_msg.lines().take(15).collect::<Vec<_>>().join("\n");
-
-        bail!("Validation failed ({command}):\n{error_summary}");
+        // Return full error message (not truncated)
+        let full_error = format!("Validation failed ({command}):\n{error_msg}");
+        return Err(full_error);
     }
 
     info!("Code validation passed: {}", command);
@@ -887,7 +1000,7 @@ mod tests {
     #[test]
     fn test_prepare_state_with_max() {
         let state = make_state(1, None);
-        let prepared = prepare_state(state, 10, Some("DONE".to_string()));
+        let prepared = prepare_state(state, Some(10), Some("DONE".to_string()));
 
         assert!(prepared.active);
         assert_eq!(prepared.max_iterations, Some(10));
@@ -897,7 +1010,7 @@ mod tests {
     #[test]
     fn test_prepare_state_unlimited() {
         let state = make_state(1, Some(5));
-        let prepared = prepare_state(state, 0, None);
+        let prepared = prepare_state(state, None, None);
 
         assert!(prepared.active);
         assert_eq!(prepared.max_iterations, None);

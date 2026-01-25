@@ -73,9 +73,13 @@ enum Commands {
         #[arg(value_enum, default_value = "build")]
         mode: commands::loop_cmd::LoopMode,
 
-        /// Maximum number of iterations (0 = unlimited)
-        #[arg(short, long, default_value = "0")]
-        max_iterations: u32,
+        /// Maximum number of iterations (default: 10 for plan, 20 for build; use --unlimited for no limit)
+        #[arg(short, long)]
+        max_iterations: Option<u32>,
+
+        /// Run without iteration limit (overrides max_iterations)
+        #[arg(long)]
+        unlimited: bool,
 
         /// Completion promise phrase
         #[arg(short, long)]
@@ -140,6 +144,7 @@ async fn main() -> Result<()> {
         Commands::Loop {
             mode,
             max_iterations,
+            unlimited,
             completion_promise,
             no_sandbox,
             prompt,
@@ -197,9 +202,21 @@ async fn main() -> Result<()> {
                 Some(guard)
             };
 
+            // Determine default max_iterations based on mode if not specified
+            let effective_max = if unlimited {
+                None
+            } else {
+                max_iterations.or_else(|| {
+                    Some(match mode {
+                        commands::loop_cmd::LoopMode::Plan => 10,
+                        commands::loop_cmd::LoopMode::Build => 20,
+                    })
+                })
+            };
+
             commands::loop_cmd::run(
                 mode,
-                max_iterations,
+                effective_max,
                 completion_promise,
                 no_sandbox,
                 prompt,
