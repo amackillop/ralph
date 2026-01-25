@@ -132,10 +132,10 @@ pub(crate) struct ClaudeConfig {
     #[serde(default = "default_claude_path")]
     pub path: String,
 
-    /// Model to use (optional)
-    /// - Default: Cursor's default model
+    /// Model to use
+    /// - Default: "opus" (recommended for complex reasoning)
     /// - Examples: "opus", "sonnet"
-    #[serde(default)]
+    #[serde(default = "default_claude_model")]
     pub model: Option<String>,
 
     /// Skip permission prompts (required for autonomous operation)
@@ -155,7 +155,7 @@ impl Default for ClaudeConfig {
     fn default() -> Self {
         Self {
             path: default_claude_path(),
-            model: None,
+            model: default_claude_model(),
             skip_permissions: true,
             output_format: default_claude_output_format(),
             verbose: false,
@@ -165,6 +165,10 @@ impl Default for ClaudeConfig {
 
 fn default_claude_path() -> String {
     "claude".to_string()
+}
+
+fn default_claude_model() -> Option<String> {
+    Some("opus".to_string())
 }
 
 fn default_claude_output_format() -> String {
