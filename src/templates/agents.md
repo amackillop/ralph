@@ -1,15 +1,11 @@
 # AGENTS.md - Operational Guide
 
-This file contains operational information for building and running the project. Keep it brief and operational only - status updates and progress notes belong in IMPLEMENTATION_PLAN.md.
+Keep this brief (~60 lines max). Status updates and progress notes belong in IMPLEMENTATION_PLAN.md, not here.
 
 ## Build & Run
 
-<!-- Add your project's build commands here -->
-
 ```bash
-# Example:
-# npm install
-# npm run build
+# Add your build commands here
 ```
 
 ## Validation
@@ -17,22 +13,15 @@ This file contains operational information for building and running the project.
 Run these after implementing to get immediate feedback:
 
 ```bash
-# Tests
-# npm test
-
-# Type checking
-# npm run typecheck
-
-# Linting
-# npm run lint
+# Tests: [test command]
+# Typecheck: [typecheck command]
+# Lint: [lint command]
 ```
 
 ## Operational Notes
 
-<!-- Add learnings about how to run the project here -->
-<!-- Example: "Use --legacy-peer-deps for npm install" -->
+<!-- Learnings about how to run the project -->
 
 ## Codebase Patterns
 
-<!-- Add patterns that should be followed -->
-<!-- Example: "All API handlers go in src/handlers/" -->
+<!-- Patterns that should be followed -->
