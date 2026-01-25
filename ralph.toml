@@ -12,7 +12,7 @@
 [agent]
 # Which agent provider to use: "cursor" or "claude"
 # Default: "cursor"
-provider = "cursor"
+provider = "claude"
 
 # ----------------------------------------------------------------------------
 # Cursor CLI Configuration

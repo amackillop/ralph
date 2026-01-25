@@ -163,18 +163,9 @@ pub(crate) async fn run(
             if last_error.starts_with("Validation error:") {
                 debug!("Appending validation error to prompt for agent visibility");
 
-                // Try to read full error from file
-                let error_file = cwd.join(".cursor").join("validation-error.txt");
-                let error_details = if error_file.exists() {
-                    std::fs::read_to_string(&error_file)
-                        .unwrap_or_else(|_| {
-                            // Fallback to truncated error from state
-                            last_error.strip_prefix("Validation error:").unwrap_or(last_error).to_string()
-                        })
-                } else {
-                    // Fallback to truncated error from state
-                    last_error.strip_prefix("Validation error:").unwrap_or(last_error).to_string()
-                };
+                let error_details = last_error
+                    .strip_prefix("Validation error:")
+                    .unwrap_or(last_error);
 
                 prompt.push_str("\n\n");
                 prompt.push_str("## ⚠️ VALIDATION ERROR FROM PREVIOUS ITERATION\n");
@@ -340,29 +331,19 @@ pub(crate) async fn run(
                         if last_error.starts_with("Validation error:") {
                             debug!("Validation passed - clearing previous validation error");
                             state.last_error = None;
-                            // Also remove validation error file if it exists
-                            let error_file = cwd.join(".cursor").join("validation-error.txt");
-                            let _ = std::fs::remove_file(&error_file);
                         }
                     }
                 }
                 Err(full_error) => {
                     warn!("Code validation failed. Agent should fix this in next iteration.");
 
-                    // Write full error to file for agent to read
-                    let error_file = cwd.join(".cursor").join("validation-error.txt");
-                    if let Some(parent) = error_file.parent() {
-                        let _ = std::fs::create_dir_all(parent);
-                    }
-                    let _ = std::fs::write(&error_file, &full_error);
-
-                    // Store reference in state (truncated for display, but full error is in file)
+                    // Truncate for logging/notifications (full error goes in state)
                     let error_summary: String =
                         full_error.lines().take(5).collect::<Vec<_>>().join("\n");
+
+                    // Store full error in state for next iteration's prompt
                     state.error_count += 1;
-                    state.last_error = Some(format!(
-                        "Validation error: {error_summary}... (see .cursor/validation-error.txt for full error)"
-                    ));
+                    state.last_error = Some(format!("Validation error:{full_error}"));
                     state.last_iteration_at = Some(chrono::Utc::now());
                     state.iteration += 1;
                     state.save(&cwd)?;

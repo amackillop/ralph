@@ -456,7 +456,7 @@ fn default_promise_format() -> String {
 }
 
 fn default_log_file() -> String {
-    ".cursor/ralph.log".to_string()
+    ".ralph/loop.log".to_string()
 }
 
 fn default_log_format() -> String {
@@ -500,7 +500,7 @@ mod tests {
         assert!(config.git.auto_push);
         assert!(config.git.protected_branches.contains(&"main".to_string()));
         assert_eq!(config.agent.provider, "cursor");
-        assert_eq!(config.monitoring.log_file, ".cursor/ralph.log");
+        assert_eq!(config.monitoring.log_file, ".ralph/loop.log");
         assert_eq!(config.monitoring.log_format, "json");
         assert!(config.monitoring.show_progress);
     }

@@ -36,7 +36,7 @@ pub(crate) fn run(all: bool) -> Result<()> {
 
 /// Returns the list of state files that can be cleaned.
 fn state_files() -> Vec<PathBuf> {
-    vec![PathBuf::from(".cursor/ralph-state.toml")]
+    vec![PathBuf::from(".ralph/state.toml")]
 }
 
 /// Returns additional config files cleaned with `--all`.
@@ -46,7 +46,6 @@ fn config_files() -> Vec<PathBuf> {
         PathBuf::from("PROMPT_plan.md"),
         PathBuf::from("PROMPT_build.md"),
         PathBuf::from("AGENTS.md"),
-        PathBuf::from(".cursor/rules/ralph.mdc"),
         PathBuf::from("IMPLEMENTATION_PLAN.md"),
     ]
 }
@@ -113,7 +112,7 @@ mod tests {
     #[test]
     fn test_state_files() {
         let files = state_files();
-        assert!(files.contains(&PathBuf::from(".cursor/ralph-state.toml")));
+        assert!(files.contains(&PathBuf::from(".ralph/state.toml")));
     }
 
     #[test]
@@ -126,7 +125,7 @@ mod tests {
     #[test]
     fn test_files_to_clean_state_only() {
         let existing: HashSet<PathBuf> = [
-            PathBuf::from(".cursor/ralph-state.toml"),
+            PathBuf::from(".ralph/state.toml"),
             PathBuf::from("ralph.toml"),
         ]
         .into_iter()
@@ -135,13 +134,13 @@ mod tests {
         let to_clean = files_to_clean(false, |p| existing.contains(p));
 
         assert_eq!(to_clean.len(), 1);
-        assert!(to_clean.contains(&PathBuf::from(".cursor/ralph-state.toml")));
+        assert!(to_clean.contains(&PathBuf::from(".ralph/state.toml")));
     }
 
     #[test]
     fn test_files_to_clean_all() {
         let existing: HashSet<PathBuf> = [
-            PathBuf::from(".cursor/ralph-state.toml"),
+            PathBuf::from(".ralph/state.toml"),
             PathBuf::from("ralph.toml"),
             PathBuf::from("AGENTS.md"),
         ]
@@ -162,7 +161,7 @@ mod tests {
     #[test]
     fn test_clean_files_removes_existing() {
         let existing: HashSet<PathBuf> = [
-            PathBuf::from(".cursor/ralph-state.toml"),
+            PathBuf::from(".ralph/state.toml"),
             PathBuf::from("ralph.toml"),
         ]
         .into_iter()

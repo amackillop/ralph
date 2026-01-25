@@ -1,14 +1,10 @@
-# Monitoring and Observability Specification
+# Monitoring
 
-## Overview
+Observability for long-running Ralph loops.
 
-When running long Ralph loops (50+ iterations), operators need visibility into progress, performance, and issues. This spec defines monitoring capabilities.
+## Progress Display
 
-## Features
-
-### 1. Progress Display
-
-Real-time progress during loop execution:
+Real-time status during loop execution:
 
 ```
 ━━━━━━━━━━━━━━━━━━━━ Iteration 15 ━━━━━━━━━━━━━━━━━━━━
@@ -18,51 +14,51 @@ Real-time progress during loop execution:
   Commits:   12 successful
   Errors:    2 (recovered)
 
-  Current task: Implementing user authentication
   Last commit: "Add JWT token validation"
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 ```
 
-### 2. Status Command Enhancement
+## Status Command
 
-`ralph status` should show:
+`ralph status` shows:
 - Current iteration and elapsed time
 - Recent commit messages
 - Error count and last error
-- Estimated time remaining (based on avg iteration time)
+- Whether loop is active
 
-### 3. Log File
+## Structured Logging
 
-Write structured logs to `.cursor/ralph.log`:
+JSON logs to `.ralph/loop.log`:
 
 ```json
-{"ts":"2024-01-15T10:30:00Z","iteration":15,"event":"start","task":"user-auth"}
-{"ts":"2024-01-15T10:38:00Z","iteration":15,"event":"complete","commit":"abc123"}
+{"ts":"2024-01-15T10:30:00Z","iteration":15,"event":"iteration_start"}
+{"ts":"2024-01-15T10:38:00Z","iteration":15,"event":"iteration_complete","commit":"abc123"}
+{"ts":"2024-01-15T10:38:01Z","iteration":15,"event":"error","error":"validation failed"}
 ```
 
-### 4. Notification Hooks ✅
+## Notifications
 
-On completion or error:
-- Webhook POST ✅
-- Desktop notification ✅
-- Sound alert ✅
-
-## Acceptance Criteria
-
-1. Progress shows during loop execution
-2. `ralph status` shows meaningful information
-3. Log file captures iteration history
-4. Errors are reported clearly without stopping the loop
+Alert on completion or error:
+- Webhook POST to URL
+- Desktop notification
+- Sound alert
 
 ## Configuration
 
 ```toml
 [monitoring]
-log_file = ".cursor/ralph.log"
-log_format = "json"  # or "text"
+log_file = ".ralph/loop.log"
+log_format = "json"
 show_progress = true
 
 [monitoring.notifications]
-on_complete = "https://hooks.example.com/ralph"  # Webhook URL for completion
-on_error = "desktop"  # Options: "webhook:<url>", "desktop", "sound", or "none"
+on_complete = "https://hooks.example.com/ralph"
+on_error = "desktop"  # "webhook:<url>", "desktop", "sound", "none"
 ```
+
+## Acceptance Criteria
+
+1. Progress visible during loop execution
+2. `ralph status` shows meaningful info even when loop not running
+3. Structured logs capture full iteration history
+4. Errors reported without stopping the loop

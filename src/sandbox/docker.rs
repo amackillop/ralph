@@ -238,7 +238,7 @@ impl SandboxRunner {
         };
 
         // Write prompt to temp file in project dir
-        let prompt_file = project_dir.join(".cursor").join("ralph-prompt.tmp");
+        let prompt_file = project_dir.join(".ralph").join("prompt.tmp");
         std::fs::create_dir_all(prompt_file.parent().unwrap())?;
         std::fs::write(&prompt_file, prompt)?;
 
@@ -587,9 +587,9 @@ impl SandboxRunner {
     /// Builds the agent command to execute in the container.
     fn build_agent_command(&self, prompt_file: &Path) -> Result<Vec<String>> {
         // Convert host prompt file path to container path
-        // The prompt file is at project_dir/.cursor/ralph-prompt.tmp
-        // In container, it's at /workspace/.cursor/ralph-prompt.tmp
-        let container_prompt_path = "/workspace/.cursor/ralph-prompt.tmp";
+        // The prompt file is at project_dir/.ralph/prompt.tmp
+        // In container, it's at /workspace/.ralph/prompt.tmp
+        let container_prompt_path = "/workspace/.ralph/prompt.tmp";
 
         match self.provider {
             Provider::Cursor => {

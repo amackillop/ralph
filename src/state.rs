@@ -1,6 +1,6 @@
 //! Ralph loop state management.
 //!
-//! Persists loop state to `.cursor/ralph-state.toml` including iteration count,
+//! Persists loop state to `.ralph/state.toml` including iteration count,
 //! mode, completion promise, and timing information.
 
 use anyhow::{Context, Result};
@@ -9,7 +9,7 @@ use serde::{Deserialize, Serialize};
 use std::fs;
 use std::path::Path;
 
-const STATE_FILE: &str = ".cursor/ralph-state.toml";
+const STATE_FILE: &str = ".ralph/state.toml";
 
 /// Loop execution mode.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -23,7 +23,7 @@ pub(crate) enum Mode {
 
 /// Persistent state for a Ralph loop.
 ///
-/// Stored in `.cursor/ralph-state.toml` and tracks the current iteration,
+/// Stored in `.ralph/state.toml` and tracks the current iteration,
 /// mode, limits, and timing information across loop restarts.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub(crate) struct RalphState {
@@ -98,7 +98,7 @@ impl RalphState {
     pub fn save(&self, project_dir: &Path) -> Result<()> {
         let state_path = project_dir.join(STATE_FILE);
 
-        // Ensure .cursor directory exists
+        // Ensure .ralph directory exists
         if let Some(parent) = state_path.parent() {
             fs::create_dir_all(parent)
                 .with_context(|| format!("Failed to create directory: {}", parent.display()))?;
@@ -261,13 +261,13 @@ mod tests {
     #[test]
     fn test_save_creates_directory() {
         let dir = tempdir().unwrap();
-        // Directory doesn't have .cursor yet
+        // Directory doesn't have .ralph yet
         let state = make_state(true, Mode::Build);
         state.save(dir.path()).unwrap();
 
-        // Should have created .cursor directory
-        assert!(dir.path().join(".cursor").exists());
-        assert!(dir.path().join(".cursor/ralph-state.toml").exists());
+        // Should have created .ralph directory
+        assert!(dir.path().join(".ralph").exists());
+        assert!(dir.path().join(".ralph/state.toml").exists());
     }
 
     #[test]
