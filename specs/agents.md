@@ -35,9 +35,10 @@ Invocation: `claude -p --dangerously-skip-permissions --model opus < prompt`
 
 ## Provider Selection
 
-1. Config file (`ralph.toml`) sets default
-2. CLI flag (`--provider`) overrides config
-3. Environment variable (future): `RALPH_PROVIDER`
+Priority (highest to lowest):
+1. CLI flag (`--provider`)
+2. Environment variable `RALPH_PROVIDER`
+3. Config file (`ralph.toml`)
 
 ## Provider Trait
 
