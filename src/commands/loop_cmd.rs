@@ -266,7 +266,7 @@ pub(crate) async fn run(
                         if consecutive_rate_limits {
                             // Likely hit a hard cap (daily/hourly quota)
                             // Use exponential backoff: 30s, 1m, 2m, 5m, 10m
-                            let backoff_seconds = match state.error_count {
+                            let backoff_seconds = match state.consecutive_errors {
                                 0..=1 => 30,
                                 2 => 60,
                                 3 => 120,
@@ -297,10 +297,28 @@ pub(crate) async fn run(
                     }
 
                     state.error_count += 1;
+                    state.consecutive_errors += 1;
                     state.last_error = Some(format!("Agent {error_type}: {error_msg}"));
                     state.last_iteration_at = Some(chrono::Utc::now());
                     state.iteration += 1;
                     state.save(&cwd)?;
+
+                    // Circuit breaker: stop if too many consecutive errors
+                    if config.monitoring.max_consecutive_errors > 0
+                        && state.consecutive_errors >= config.monitoring.max_consecutive_errors
+                    {
+                        // Clean up persistent container before bailing
+                        if let Some(container_name) = &persistent_container_name {
+                            let _ =
+                                SandboxRunner::remove_persistent_container(container_name).await;
+                        }
+                        bail!(
+                            "Circuit breaker triggered: {} consecutive errors (limit: {}). \
+                             Increase monitoring.max_consecutive_errors in ralph.toml to continue.",
+                            state.consecutive_errors,
+                            config.monitoring.max_consecutive_errors
+                        );
+                    }
 
                     // Show progress if enabled
                     if config.monitoring.show_progress {
@@ -341,6 +359,7 @@ pub(crate) async fn run(
 
                     // Store full error in state for next iteration's prompt
                     state.error_count += 1;
+                    state.consecutive_errors += 1;
                     state.last_error = Some(format!("Validation error:{full_error}"));
                     state.last_iteration_at = Some(chrono::Utc::now());
                     state.iteration += 1;
@@ -368,6 +387,23 @@ pub(crate) async fn run(
                         .notify(NotificationEvent::Error, &error_details)
                         .await;
 
+                    // Circuit breaker: stop if too many consecutive errors
+                    if config.monitoring.max_consecutive_errors > 0
+                        && state.consecutive_errors >= config.monitoring.max_consecutive_errors
+                    {
+                        // Clean up persistent container before bailing
+                        if let Some(container_name) = &persistent_container_name {
+                            let _ =
+                                SandboxRunner::remove_persistent_container(container_name).await;
+                        }
+                        bail!(
+                            "Circuit breaker triggered: {} consecutive validation errors (limit: {}). \
+                             Increase monitoring.max_consecutive_errors in ralph.toml to continue.",
+                            state.consecutive_errors,
+                            config.monitoring.max_consecutive_errors
+                        );
+                    }
+
                     // Continue to next iteration (let agent fix it)
                     if config.monitoring.show_progress {
                         let progress = ProgressInfo::new(&state, &cwd).await;
@@ -378,7 +414,8 @@ pub(crate) async fn run(
             }
         }
 
-        // Update last iteration timestamp
+        // Successful iteration - reset consecutive errors counter
+        state.consecutive_errors = 0;
         state.last_iteration_at = Some(chrono::Utc::now());
         state.save(&cwd)?;
 
@@ -417,6 +454,8 @@ pub(crate) async fn run(
             if let Err(e) = git_push(&cwd, &config.git.protected_branches).await {
                 warn!("Git push failed: {e}");
                 state.error_count += 1;
+                // Note: Git push failures don't increment consecutive_errors because
+                // the iteration itself succeeded. The agent produced valid code.
                 state.last_error = Some(format!("Git push failed: {e}"));
                 state.save(&cwd)?;
                 // Log git push error
@@ -953,6 +992,7 @@ mod tests {
             started_at: Utc::now(),
             last_iteration_at: None,
             error_count: 0,
+            consecutive_errors: 0,
             last_error: None,
         }
     }
@@ -1039,6 +1079,7 @@ mod tests {
             started_at: Utc::now(),
             last_iteration_at: None,
             error_count: 0,
+            consecutive_errors: 0,
             last_error: None,
         };
         let config = Config::default();
