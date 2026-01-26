@@ -36,6 +36,9 @@ bytes = "1"
 anyhow = "1"
 thiserror = "2"
 
+# Shell command parsing
+shell-words = "1"
+
 # Utilities
 dirs = "5"
 colored = "2"

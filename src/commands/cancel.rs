@@ -101,6 +101,7 @@ mod tests {
             started_at: Utc::now(),
             last_iteration_at: None,
             error_count: 0,
+            consecutive_errors: 0,
             last_error: None,
         }
     }
@@ -141,6 +142,7 @@ mod tests {
             started_at: Utc::now(),
             last_iteration_at: Some(Utc::now()),
             error_count: 0,
+            consecutive_errors: 0,
             last_error: None,
         };
 
