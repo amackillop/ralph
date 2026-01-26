@@ -152,6 +152,7 @@ mod tests {
             skip_permissions: false,
             output_format: "json".to_string(),
             verbose: true,
+            timeout_minutes: Some(90),
         };
         let provider = ClaudeProvider::new(config.clone());
         assert_eq!(provider.config.path, "/custom/claude");
@@ -159,6 +160,7 @@ mod tests {
         assert!(!provider.config.skip_permissions);
         assert_eq!(provider.config.output_format, "json");
         assert!(provider.config.verbose);
+        assert_eq!(provider.config.timeout_minutes, Some(90));
     }
 
     #[test]

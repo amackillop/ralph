@@ -66,6 +66,15 @@ impl AgentConfig {
     pub fn get_provider(&self) -> Result<Provider> {
         self.provider.parse()
     }
+
+    /// Get the timeout for a specific provider.
+    /// Returns `None` if no provider-specific timeout is configured.
+    pub fn get_provider_timeout(&self, provider: Provider) -> Option<u32> {
+        match provider {
+            Provider::Cursor => self.cursor.timeout_minutes,
+            Provider::Claude => self.claude.timeout_minutes,
+        }
+    }
 }
 
 fn default_provider() -> String {
@@ -98,6 +107,11 @@ pub(crate) struct CursorConfig {
     /// Default: `"disabled"` to allow validation commands. Leverage Docker sandbox for more restricted access.
     #[serde(default = "default_cursor_sandbox")]
     pub sandbox: String,
+
+    /// Timeout in minutes for cursor agent execution.
+    /// Overrides `sandbox.resources.timeout_minutes` when set.
+    #[serde(default)]
+    pub timeout_minutes: Option<u32>,
 }
 
 impl Default for CursorConfig {
@@ -107,6 +121,7 @@ impl Default for CursorConfig {
             model: None,
             output_format: default_output_format(),
             sandbox: default_cursor_sandbox(),
+            timeout_minutes: None,
         }
     }
 }
@@ -149,6 +164,12 @@ pub(crate) struct ClaudeConfig {
     /// Verbose output
     #[serde(default)]
     pub verbose: bool,
+
+    /// Timeout in minutes for claude agent execution.
+    /// Overrides `sandbox.resources.timeout_minutes` when set.
+    /// Claude Opus often needs longer timeouts than other providers.
+    #[serde(default)]
+    pub timeout_minutes: Option<u32>,
 }
 
 impl Default for ClaudeConfig {
@@ -159,6 +180,7 @@ impl Default for ClaudeConfig {
             skip_permissions: true,
             output_format: default_claude_output_format(),
             verbose: false,
+            timeout_minutes: None,
         }
     }
 }
@@ -847,5 +869,72 @@ credential_mounts = []
 ";
         let config: Config = toml::from_str(toml).unwrap();
         assert!(config.sandbox.credential_mounts.is_empty());
+    }
+
+    #[test]
+    fn test_cursor_timeout_default() {
+        let config = Config::default();
+        assert_eq!(config.agent.cursor.timeout_minutes, None);
+    }
+
+    #[test]
+    fn test_cursor_timeout_custom() {
+        let toml = r"
+[agent.cursor]
+timeout_minutes = 120
+";
+        let config: Config = toml::from_str(toml).unwrap();
+        assert_eq!(config.agent.cursor.timeout_minutes, Some(120));
+    }
+
+    #[test]
+    fn test_claude_timeout_default() {
+        let config = Config::default();
+        assert_eq!(config.agent.claude.timeout_minutes, None);
+    }
+
+    #[test]
+    fn test_claude_timeout_custom() {
+        let toml = r"
+[agent.claude]
+timeout_minutes = 90
+";
+        let config: Config = toml::from_str(toml).unwrap();
+        assert_eq!(config.agent.claude.timeout_minutes, Some(90));
+    }
+
+    #[test]
+    fn test_get_provider_timeout_cursor() {
+        let toml = r"
+[agent.cursor]
+timeout_minutes = 45
+";
+        let config: Config = toml::from_str(toml).unwrap();
+        assert_eq!(
+            config.agent.get_provider_timeout(Provider::Cursor),
+            Some(45)
+        );
+        assert_eq!(config.agent.get_provider_timeout(Provider::Claude), None);
+    }
+
+    #[test]
+    fn test_get_provider_timeout_claude() {
+        let toml = r"
+[agent.claude]
+timeout_minutes = 180
+";
+        let config: Config = toml::from_str(toml).unwrap();
+        assert_eq!(
+            config.agent.get_provider_timeout(Provider::Claude),
+            Some(180)
+        );
+        assert_eq!(config.agent.get_provider_timeout(Provider::Cursor), None);
+    }
+
+    #[test]
+    fn test_get_provider_timeout_none() {
+        let config = Config::default();
+        assert_eq!(config.agent.get_provider_timeout(Provider::Cursor), None);
+        assert_eq!(config.agent.get_provider_timeout(Provider::Claude), None);
     }
 }

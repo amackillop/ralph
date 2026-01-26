@@ -131,12 +131,14 @@ mod tests {
             model: Some("gpt-4".to_string()),
             sandbox: "on".to_string(),
             output_format: "json".to_string(),
+            timeout_minutes: Some(30),
         };
         let provider = CursorProvider::new(config.clone());
         assert_eq!(provider.config.path, "/custom/agent");
         assert_eq!(provider.config.model, Some("gpt-4".to_string()));
         assert_eq!(provider.config.sandbox, "on");
         assert_eq!(provider.config.output_format, "json");
+        assert_eq!(provider.config.timeout_minutes, Some(30));
     }
 
     #[test]
