@@ -856,16 +856,18 @@ fn format_loop_finished(total_iterations: u32) -> String {
 async fn validate_code(cwd: &Path, command: &str) -> Result<(), String> {
     debug!("Validating code with command: {}", command);
 
-    // Parse command into program and args
-    let mut parts = command.split_whitespace();
-    let program = parts
-        .next()
+    // Parse command using shell-words to handle quoted arguments properly
+    // e.g., `sh -c "cmd1 && cmd2"` becomes ["sh", "-c", "cmd1 && cmd2"]
+    let parts = shell_words::split(command)
+        .map_err(|e| format!("Failed to parse validation command: {e}"))?;
+
+    let (program, args) = parts
+        .split_first()
         .ok_or_else(|| "Validation command cannot be empty".to_string())?;
-    let args: Vec<&str> = parts.collect();
 
     let output = tokio::process::Command::new(program)
         .current_dir(cwd)
-        .args(&args)
+        .args(args)
         .output()
         .await
         .map_err(|e| format!("Failed to run validation command: {e}"))?;
@@ -1486,5 +1488,48 @@ mod tests {
             );
         }
         // Success or other failure is fine
+    }
+
+    #[tokio::test]
+    async fn test_validate_code_simple_command() {
+        // Simple command without quotes should work
+        let cwd = std::env::current_dir().unwrap();
+        let result = validate_code(&cwd, "true").await;
+        assert!(result.is_ok());
+    }
+
+    #[tokio::test]
+    async fn test_validate_code_quoted_args() {
+        // Quoted arguments should be parsed correctly
+        // sh -c "echo hello" should be parsed as ["sh", "-c", "echo hello"]
+        let cwd = std::env::current_dir().unwrap();
+        let result = validate_code(&cwd, "sh -c \"exit 0\"").await;
+        assert!(result.is_ok());
+    }
+
+    #[tokio::test]
+    async fn test_validate_code_quoted_args_complex() {
+        // Complex quoted arguments with && should work
+        // This was broken with split_whitespace()
+        let cwd = std::env::current_dir().unwrap();
+        let result = validate_code(&cwd, "sh -c \"true && true\"").await;
+        assert!(result.is_ok());
+    }
+
+    #[tokio::test]
+    async fn test_validate_code_empty_command() {
+        let cwd = std::env::current_dir().unwrap();
+        let result = validate_code(&cwd, "").await;
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("cannot be empty"));
+    }
+
+    #[tokio::test]
+    async fn test_validate_code_unmatched_quote() {
+        // Unmatched quote should fail parsing
+        let cwd = std::env::current_dir().unwrap();
+        let result = validate_code(&cwd, "sh -c \"unclosed").await;
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("parse"));
     }
 }
