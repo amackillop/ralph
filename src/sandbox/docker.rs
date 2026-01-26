@@ -1,9 +1,10 @@
 use anyhow::{Context, Result};
 use bollard::container::{
-    Config as ContainerConfig, CreateContainerOptions, KillContainerOptions, ListContainersOptions,
-    LogOutput, RemoveContainerOptions,
+    Config as ContainerConfig, CreateContainerOptions, InspectContainerOptions,
+    KillContainerOptions, ListContainersOptions, LogOutput, RemoveContainerOptions,
 };
 use bollard::exec::{CreateExecOptions, StartExecResults};
+use bollard::models::ContainerStateStatusEnum;
 use bollard::Docker;
 use futures_util::StreamExt;
 use std::fmt::Write;
@@ -182,6 +183,76 @@ impl SandboxRunner {
         Ok(())
     }
 
+    /// Checks if a container is healthy and ready for use.
+    /// Returns Ok(()) if container is running or was successfully restarted.
+    /// Returns Err if container is dead/corrupted and needs recreation.
+    async fn check_container_health(docker: &Docker, container_name: &str) -> Result<()> {
+        let info = docker
+            .inspect_container(container_name, None::<InspectContainerOptions>)
+            .await
+            .context("Failed to inspect container - it may have been removed")?;
+
+        let state = info.state.context("Container has no state")?;
+        let status = state.status.context("Container state has no status")?;
+
+        match status {
+            ContainerStateStatusEnum::RUNNING => {
+                debug!("Container {} is running", container_name);
+                Ok(())
+            }
+            ContainerStateStatusEnum::EXITED | ContainerStateStatusEnum::CREATED => {
+                // Container stopped - try to restart it
+                info!(
+                    "Container {} is not running ({}), attempting restart",
+                    container_name, status
+                );
+                docker
+                    .start_container::<String>(container_name, None)
+                    .await
+                    .context("Failed to restart stopped container")?;
+                info!("Successfully restarted container {}", container_name);
+                Ok(())
+            }
+            ContainerStateStatusEnum::DEAD => {
+                // Dead container cannot be restarted - needs recreation
+                anyhow::bail!(
+                    "Container {container_name} is dead and cannot be restarted. Please recreate it."
+                )
+            }
+            ContainerStateStatusEnum::PAUSED => {
+                // Unpause the container
+                info!("Container {} is paused, attempting unpause", container_name);
+                docker
+                    .unpause_container(container_name)
+                    .await
+                    .context("Failed to unpause container")?;
+                info!("Successfully unpaused container {}", container_name);
+                Ok(())
+            }
+            ContainerStateStatusEnum::RESTARTING => {
+                // Already restarting - wait briefly and check again
+                debug!("Container {} is restarting, waiting...", container_name);
+                tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+                // Recursive check with depth limit would be better, but for now just verify running
+                let info2 = docker
+                    .inspect_container(container_name, None::<InspectContainerOptions>)
+                    .await?;
+                if let Some(state2) = info2.state {
+                    if state2.running.unwrap_or(false) {
+                        return Ok(());
+                    }
+                }
+                anyhow::bail!("Container {container_name} failed to restart")
+            }
+            ContainerStateStatusEnum::REMOVING => {
+                anyhow::bail!("Container {container_name} is being removed. Please recreate it.")
+            }
+            ContainerStateStatusEnum::EMPTY => {
+                anyhow::bail!("Container {container_name} has unknown state. Please recreate it.")
+            }
+        }
+    }
+
     /// Runs the agent in a sandboxed container.
     /// If `reuse_container_name` is provided, uses that existing container instead of creating a new one.
     pub(crate) async fn run(
@@ -202,7 +273,8 @@ impl SandboxRunner {
             .context("Cannot ping Docker daemon. Is Docker running?")?;
 
         let container_name = if let Some(name) = reuse_container_name {
-            // Reuse existing container
+            // Check container health before reusing
+            Self::check_container_health(&docker, name).await?;
             debug!("Reusing container: {}", name);
             name.to_string()
         } else {
@@ -1027,6 +1099,87 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[tokio::test]
+    async fn test_check_container_health_nonexistent() {
+        // Health check on non-existent container should fail gracefully
+        let Ok(docker) = Docker::connect_with_local_defaults() else {
+            return; // Docker not available, skip test
+        };
+
+        if docker.ping().await.is_err() {
+            return; // Docker not accessible, skip test
+        }
+
+        let result =
+            SandboxRunner::check_container_health(&docker, "nonexistent-container-xyz").await;
+
+        // Should fail with inspection error
+        assert!(result.is_err());
+        let error_msg = result.unwrap_err().to_string();
+        assert!(
+            error_msg.contains("inspect")
+                || error_msg.contains("removed")
+                || error_msg.contains("No such container"),
+            "Unexpected error: {error_msg}"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_check_container_health_running_container() {
+        // Integration test: create a container, verify health check passes
+        let config = Config::default();
+        let runner = SandboxRunner::new(config.clone(), Provider::Cursor, config.agent.clone());
+
+        let temp_dir = tempfile::tempdir().unwrap();
+
+        // Create a persistent container
+        let Ok(container_name) = runner.create_persistent_container(temp_dir.path()).await else {
+            return; // Docker or image not available, skip test
+        };
+
+        // Health check should pass for running container
+        let docker = Docker::connect_with_local_defaults().unwrap();
+        let result = SandboxRunner::check_container_health(&docker, &container_name).await;
+        assert!(result.is_ok(), "Health check failed: {result:?}");
+
+        // Clean up
+        let _ = SandboxRunner::remove_persistent_container(&container_name).await;
+    }
+
+    #[tokio::test]
+    async fn test_check_container_health_stopped_container() {
+        // Integration test: create a container, stop it, verify health check restarts it
+        let config = Config::default();
+        let runner = SandboxRunner::new(config.clone(), Provider::Cursor, config.agent.clone());
+
+        let temp_dir = tempfile::tempdir().unwrap();
+
+        // Create a persistent container
+        let Ok(container_name) = runner.create_persistent_container(temp_dir.path()).await else {
+            return; // Docker or image not available, skip test
+        };
+
+        let docker = Docker::connect_with_local_defaults().unwrap();
+
+        // Stop the container
+        let _ = docker.stop_container(&container_name, None).await;
+
+        // Health check should restart it
+        let result = SandboxRunner::check_container_health(&docker, &container_name).await;
+        assert!(result.is_ok(), "Health check failed to restart: {result:?}");
+
+        // Verify container is now running
+        let info = docker
+            .inspect_container(&container_name, None::<InspectContainerOptions>)
+            .await
+            .unwrap();
+        let running = info.state.and_then(|s| s.running).unwrap_or(false);
+        assert!(running, "Container should be running after health check");
+
+        // Clean up
+        let _ = SandboxRunner::remove_persistent_container(&container_name).await;
     }
 
     #[test]
