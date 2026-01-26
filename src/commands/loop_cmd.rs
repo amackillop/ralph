@@ -676,15 +676,35 @@ fn is_max_iterations_reached(state: &RalphState) -> bool {
 }
 
 /// Resolves the agent provider to use.
-/// CLI override takes precedence over config.
+/// Priority: CLI flag > `RALPH_PROVIDER` env var > config file.
 fn resolve_provider(config: &Config, provider_override: Option<&str>) -> Result<Provider> {
-    match provider_override {
-        Some(p) => {
-            debug!("Using CLI provider override: {}", p);
-            p.parse()
-        }
-        None => config.agent.get_provider(),
+    let env_provider = std::env::var("RALPH_PROVIDER").ok();
+    resolve_provider_with_env(config, provider_override, env_provider.as_deref())
+}
+
+/// Internal helper for provider resolution with explicit env var value.
+/// Enables testing without modifying actual environment.
+fn resolve_provider_with_env(
+    config: &Config,
+    provider_override: Option<&str>,
+    env_provider: Option<&str>,
+) -> Result<Provider> {
+    // 1. CLI flag takes highest precedence
+    if let Some(p) = provider_override {
+        debug!("Using CLI provider override: {}", p);
+        return p.parse();
     }
+
+    // 2. RALPH_PROVIDER env var takes precedence over config
+    if let Some(env_val) = env_provider {
+        if !env_val.is_empty() {
+            debug!("Using RALPH_PROVIDER env var: {}", env_val);
+            return env_val.parse();
+        }
+    }
+
+    // 3. Fall back to config file
+    config.agent.get_provider()
 }
 
 // -----------------------------------------------------------------------------
@@ -1214,6 +1234,44 @@ mod tests {
     fn test_resolve_provider_invalid() {
         let config = Config::default();
         let result = resolve_provider(&config, Some("invalid"));
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_resolve_provider_env_var_overrides_config() {
+        let config = Config::default(); // defaults to cursor
+        let provider = resolve_provider_with_env(&config, None, Some("claude")).unwrap();
+        assert_eq!(provider, Provider::Claude);
+    }
+
+    #[test]
+    fn test_resolve_provider_cli_overrides_env_var() {
+        let config = Config::default();
+        // CLI flag "cursor" should win over env var "claude"
+        let provider = resolve_provider_with_env(&config, Some("cursor"), Some("claude")).unwrap();
+        assert_eq!(provider, Provider::Cursor);
+    }
+
+    #[test]
+    fn test_resolve_provider_empty_env_var_falls_back() {
+        let config = Config::default(); // defaults to cursor
+                                        // Empty env var should fall back to config
+        let provider = resolve_provider_with_env(&config, None, Some("")).unwrap();
+        assert_eq!(provider, Provider::Cursor);
+    }
+
+    #[test]
+    fn test_resolve_provider_none_env_var_falls_back() {
+        let config = Config::default(); // defaults to cursor
+                                        // None env var should fall back to config
+        let provider = resolve_provider_with_env(&config, None, None).unwrap();
+        assert_eq!(provider, Provider::Cursor);
+    }
+
+    #[test]
+    fn test_resolve_provider_invalid_env_var() {
+        let config = Config::default();
+        let result = resolve_provider_with_env(&config, None, Some("invalid_provider"));
         assert!(result.is_err());
     }
 
