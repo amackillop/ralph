@@ -255,11 +255,9 @@ pub(crate) async fn run(
                     let consecutive_rate_limits = if is_rate_limit {
                         // Count consecutive rate limit errors in recent iterations
                         // Check if last error was also a rate limit
-                        state
-                            .last_error
-                            .as_ref()
-                            .map(|e| e.contains("rate limit") || e.contains("resource_exhausted"))
-                            .unwrap_or(false)
+                        state.last_error.as_ref().is_some_and(|e| {
+                            e.contains("rate limit") || e.contains("resource_exhausted")
+                        })
                     } else {
                         false
                     };
@@ -299,7 +297,7 @@ pub(crate) async fn run(
                     }
 
                     state.error_count += 1;
-                    state.last_error = Some(format!("Agent {}: {}", error_type, error_msg));
+                    state.last_error = Some(format!("Agent {error_type}: {error_msg}"));
                     state.last_iteration_at = Some(chrono::Utc::now());
                     state.iteration += 1;
                     state.save(&cwd)?;

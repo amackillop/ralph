@@ -65,8 +65,8 @@ skip_permissions = true
 
 # Output format
 # Options: "text", "json", "stream-json"
-# Default: "stream-json"
-output_format = "stream-json"
+# Default: "text"
+output_format = "text"
 
 # Enable verbose output from Claude CLI
 # Default: false

@@ -93,7 +93,7 @@ async fn build_image_nix(tag: &str, project_dir: &Path) -> Result<()> {
 
     if !nix_build.status.success() {
         let stderr = String::from_utf8_lossy(&nix_build.stderr);
-        anyhow::bail!("Nix build failed:\n{}", stderr);
+        anyhow::bail!("Nix build failed:\n{stderr}");
     }
 
     let image_path = String::from_utf8_lossy(&nix_build.stdout)
@@ -112,7 +112,7 @@ async fn build_image_nix(tag: &str, project_dir: &Path) -> Result<()> {
 
     if !docker_load.status.success() {
         let stderr = String::from_utf8_lossy(&docker_load.stderr);
-        anyhow::bail!("Docker load failed:\n{}", stderr);
+        anyhow::bail!("Docker load failed:\n{stderr}");
     }
 
     let load_output = String::from_utf8_lossy(&docker_load.stdout);
@@ -130,7 +130,7 @@ async fn build_image_nix(tag: &str, project_dir: &Path) -> Result<()> {
 
         if !docker_tag.status.success() {
             let stderr = String::from_utf8_lossy(&docker_tag.stderr);
-            anyhow::bail!("Docker tag failed:\n{}", stderr);
+            anyhow::bail!("Docker tag failed:\n{stderr}");
         }
     }
 
@@ -251,16 +251,14 @@ async fn pull_image(image: &str, use_local_image: bool, force: bool) -> Result<(
         .context("Cannot ping Docker daemon. Is Docker running?")?;
 
     // Check for local image if configured to prefer local
-    if use_local_image && !force {
-        if image_exists_locally(&docker, image).await? {
-            info!(
-                "Image '{}' found locally. Skipping pull (use --force to override).",
-                image
-            );
-            println!("Image '{}' already exists locally.", image);
-            println!("Use --force to pull anyway.");
-            return Ok(());
-        }
+    if use_local_image && !force && image_exists_locally(&docker, image).await? {
+        info!(
+            "Image '{}' found locally. Skipping pull (use --force to override).",
+            image
+        );
+        println!("Image '{image}' already exists locally.");
+        println!("Use --force to pull anyway.");
+        return Ok(());
     }
 
     info!("Pulling Docker image: {}", image);
@@ -450,30 +448,26 @@ mod tests {
     #[tokio::test]
     async fn test_image_exists_locally_no_docker() {
         // This test verifies the function handles Docker unavailability gracefully
-        let docker = Docker::connect_with_local_defaults();
-        match docker {
-            Ok(d) => {
-                // Docker is available, test the function
-                let result = image_exists_locally(&d, "nonexistent:image").await;
-                match result {
-                    Ok(exists) => {
-                        // Image should not exist
-                        assert!(!exists);
-                    }
-                    Err(e) => {
-                        // Docker daemon not running
-                        let error_msg = e.to_string();
-                        assert!(
-                            error_msg.contains("Docker")
-                                || error_msg.contains("docker")
-                                || error_msg.contains("ping"),
-                            "Unexpected error: {error_msg}"
-                        );
-                    }
-                }
+        let Ok(d) = Docker::connect_with_local_defaults() else {
+            // Docker not available - test passes
+            return;
+        };
+        // Docker is available, test the function
+        let result = image_exists_locally(&d, "nonexistent:image").await;
+        match result {
+            Ok(exists) => {
+                // Image should not exist
+                assert!(!exists);
             }
-            Err(_) => {
-                // Docker not available - test passes
+            Err(e) => {
+                // Docker daemon not running
+                let error_msg = e.to_string();
+                assert!(
+                    error_msg.contains("Docker")
+                        || error_msg.contains("docker")
+                        || error_msg.contains("ping"),
+                    "Unexpected error: {error_msg}"
+                );
             }
         }
     }

@@ -11,9 +11,8 @@
 .DS_Store
 Thumbs.db
 
-# Ralph state (generated at runtime)
-.cursor/ralph-state.toml
-.cursor/ralph-prompt.tmp
+# Ralph runtime files
+.ralph/
 
 # Nix
 result

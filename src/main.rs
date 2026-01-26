@@ -77,7 +77,7 @@ enum Commands {
         #[arg(short, long)]
         max_iterations: Option<u32>,
 
-        /// Run without iteration limit (overrides max_iterations)
+        /// Run without iteration limit (overrides `max_iterations`)
         #[arg(long)]
         unlimited: bool,
 
@@ -206,7 +206,7 @@ async fn main() -> Result<()> {
             let effective_max = if unlimited {
                 None
             } else {
-                max_iterations.or_else(|| {
+                max_iterations.or({
                     Some(match mode {
                         commands::loop_cmd::LoopMode::Plan => 10,
                         commands::loop_cmd::LoopMode::Build => 20,

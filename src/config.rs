@@ -167,12 +167,13 @@ fn default_claude_path() -> String {
     "claude".to_string()
 }
 
+#[allow(clippy::unnecessary_wraps)] // Required for serde default
 fn default_claude_model() -> Option<String> {
     Some("opus".to_string())
 }
 
 fn default_claude_output_format() -> String {
-    "stream-json".to_string()
+    "text".to_string()
 }
 
 /// Docker sandbox configuration for isolated execution.
