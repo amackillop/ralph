@@ -414,7 +414,7 @@ pub(crate) async fn run(
 
         // Git operations
         if config.git.auto_push {
-            if let Err(e) = git_push(&cwd).await {
+            if let Err(e) = git_push(&cwd, &config.git.protected_branches).await {
                 warn!("Git push failed: {e}");
                 state.error_count += 1;
                 state.last_error = Some(format!("Git push failed: {e}"));
@@ -833,8 +833,17 @@ async fn validate_code(cwd: &Path, command: &str) -> Result<(), String> {
 // Git operations
 // -----------------------------------------------------------------------------
 
-async fn git_push(cwd: &Path) -> Result<()> {
+async fn git_push(cwd: &Path, protected_branches: &[String]) -> Result<()> {
     debug!("Pushing to git...");
+
+    // Check if current branch is protected
+    let branch = get_current_branch(cwd).await?;
+    if protected_branches.iter().any(|b| b == &branch) {
+        anyhow::bail!(
+            "Refusing to push to protected branch '{branch}'. \
+             Remove it from git.protected_branches in ralph.toml to allow pushing."
+        );
+    }
 
     let output = tokio::process::Command::new("git")
         .current_dir(cwd)
@@ -845,7 +854,6 @@ async fn git_push(cwd: &Path) -> Result<()> {
 
     if !output.status.success() {
         // Try to create upstream branch
-        let branch = get_current_branch(cwd).await?;
         tokio::process::Command::new("git")
             .current_dir(cwd)
             .args(["push", "-u", "origin", &branch])
@@ -1303,5 +1311,81 @@ mod tests {
             }
         }
         result
+    }
+
+    #[tokio::test]
+    async fn test_git_push_rejects_protected_branch() {
+        use std::process::Command;
+
+        let cwd = std::env::current_dir().unwrap();
+
+        // Check if we're in a git repo
+        let Ok(git_output) = Command::new("git")
+            .args(["rev-parse", "--git-dir"])
+            .current_dir(&cwd)
+            .output()
+        else {
+            return; // Git not available
+        };
+        if !git_output.status.success() {
+            return; // Not in a git repo
+        }
+
+        // Get current branch
+        let Ok(branch) = get_current_branch(&cwd).await else {
+            return; // Couldn't get branch
+        };
+
+        // Call git_push with current branch in protected list - should fail
+        let protected = vec![branch.clone()];
+        let result = git_push(&cwd, &protected).await;
+
+        assert!(result.is_err());
+        let err = result.unwrap_err().to_string();
+        assert!(err.contains("protected branch"));
+        assert!(err.contains(&branch));
+    }
+
+    #[tokio::test]
+    async fn test_git_push_allows_non_protected_branch() {
+        use std::process::Command;
+
+        let cwd = std::env::current_dir().unwrap();
+
+        // Check if we're in a git repo
+        let Ok(git_output) = Command::new("git")
+            .args(["rev-parse", "--git-dir"])
+            .current_dir(&cwd)
+            .output()
+        else {
+            return; // Git not available
+        };
+        if !git_output.status.success() {
+            return; // Not in a git repo
+        }
+
+        // Get current branch (just to verify we can)
+        let Ok(_branch) = get_current_branch(&cwd).await else {
+            return; // Couldn't get branch
+        };
+
+        // Protected branches that don't match current branch
+        let protected = vec![
+            "this-branch-does-not-exist-1234567890".to_string(),
+            "another-nonexistent-branch".to_string(),
+        ];
+
+        // Call git_push - it should not fail due to protected branch check
+        // (it may fail for other reasons like no remote, but that's a different error)
+        let result = git_push(&cwd, &protected).await;
+
+        // If it failed, it shouldn't be because of protected branch
+        if let Err(e) = result {
+            assert!(
+                !e.to_string().contains("protected branch"),
+                "Should not fail due to protected branch"
+            );
+        }
+        // Success or other failure is fine
     }
 }
