@@ -1,4 +1,5 @@
 use anyhow::{Context, Result};
+use async_trait::async_trait;
 use bollard::container::{
     Config as ContainerConfig, CreateContainerOptions, InspectContainerOptions,
     KillContainerOptions, ListContainersOptions, LogOutput, RemoveContainerOptions,
@@ -15,6 +16,7 @@ use crate::agent::Provider;
 use crate::config::{AgentConfig, Config};
 use crate::sandbox::error::SandboxError;
 use crate::sandbox::network::validate_domain;
+use crate::sandbox::Sandbox;
 
 /// Connects to the Docker daemon and verifies it's accessible.
 ///
@@ -31,14 +33,17 @@ async fn connect_docker() -> Result<Docker> {
     Ok(docker)
 }
 
-/// Runs agents inside a Docker container for isolation.
-pub(crate) struct SandboxRunner {
+/// Docker-based sandbox implementation.
+///
+/// Runs agents inside Docker containers with configurable network policies,
+/// resource limits, and volume mounts.
+pub(crate) struct DockerSandbox {
     config: Config,
     provider: Provider,
     agent_config: AgentConfig,
 }
 
-impl SandboxRunner {
+impl DockerSandbox {
     /// Creates a new sandbox runner with the given configuration and provider.
     pub(crate) fn new(config: Config, provider: Provider, agent_config: AgentConfig) -> Self {
         Self {
@@ -279,7 +284,7 @@ impl SandboxRunner {
 
     /// Runs the agent in a sandboxed container.
     /// If `reuse_container_name` is provided, uses that existing container instead of creating a new one.
-    pub(crate) async fn run(
+    async fn run_in_container(
         &self,
         project_dir: &Path,
         prompt: &str,
@@ -771,7 +776,7 @@ fn build_iptables_script(allowed: &[String]) -> String {
     script
 }
 
-impl SandboxRunner {
+impl DockerSandbox {
     /// Builds the agent command to execute in the container.
     fn build_agent_command(&self, prompt_file: &Path) -> Result<Vec<String>> {
         // Convert host prompt file path to container path
@@ -837,6 +842,30 @@ impl SandboxRunner {
                 Ok(vec!["sh".to_string(), "-c".to_string(), full_cmd])
             }
         }
+    }
+}
+
+#[async_trait]
+impl Sandbox for DockerSandbox {
+    async fn cleanup_orphaned(&self) -> Result<u32> {
+        Self::cleanup_orphaned_containers().await
+    }
+
+    async fn create_persistent(&self, project_dir: &Path) -> Result<String> {
+        self.create_persistent_container(project_dir).await
+    }
+
+    async fn remove_persistent(&self, id: &str) -> Result<()> {
+        Self::remove_persistent_container(id).await
+    }
+
+    async fn run(
+        &self,
+        project_dir: &Path,
+        prompt: &str,
+        reuse_id: Option<&str>,
+    ) -> Result<String> {
+        self.run_in_container(project_dir, prompt, reuse_id).await
     }
 }
 
@@ -923,18 +952,18 @@ mod tests {
     }
 
     #[test]
-    fn test_sandbox_runner_new() {
+    fn test_docker_sandbox_new() {
         let config = Config::default();
-        let runner = SandboxRunner::new(config.clone(), Provider::Cursor, config.agent.clone());
-        assert_eq!(runner.config.sandbox.enabled, config.sandbox.enabled);
-        assert_eq!(runner.provider, Provider::Cursor);
+        let sandbox = DockerSandbox::new(config.clone(), Provider::Cursor, config.agent.clone());
+        assert_eq!(sandbox.config.sandbox.enabled, config.sandbox.enabled);
+        assert_eq!(sandbox.provider, Provider::Cursor);
     }
 
     #[test]
-    fn test_sandbox_runner_new_claude() {
+    fn test_docker_sandbox_new_claude() {
         let config = Config::default();
-        let runner = SandboxRunner::new(config.clone(), Provider::Claude, config.agent.clone());
-        assert_eq!(runner.provider, Provider::Claude);
+        let sandbox = DockerSandbox::new(config.clone(), Provider::Claude, config.agent.clone());
+        assert_eq!(sandbox.provider, Provider::Claude);
     }
 
     #[test]
@@ -942,7 +971,7 @@ mod tests {
         use tempfile::tempdir;
 
         let config = Config::default();
-        let runner = SandboxRunner::new(config.clone(), Provider::Cursor, config.agent.clone());
+        let runner = DockerSandbox::new(config.clone(), Provider::Cursor, config.agent.clone());
 
         let temp_dir = tempdir().unwrap();
         let prompt_file = temp_dir.path().join("test-prompt.txt");
@@ -960,7 +989,7 @@ mod tests {
         use tempfile::tempdir;
 
         let config = Config::default();
-        let runner = SandboxRunner::new(config.clone(), Provider::Claude, config.agent.clone());
+        let runner = DockerSandbox::new(config.clone(), Provider::Claude, config.agent.clone());
 
         let temp_dir = tempdir().unwrap();
         let prompt_file = temp_dir.path().join("test-prompt.txt");
@@ -1002,7 +1031,7 @@ mod tests {
     async fn test_cleanup_orphaned_containers() {
         // This test verifies the cleanup function can be called
         // It will skip if Docker is not available
-        let result = SandboxRunner::cleanup_orphaned_containers().await;
+        let result = DockerSandbox::cleanup_orphaned_containers().await;
 
         // Function should either succeed (returning count) or fail with Docker connection error
         match result {
@@ -1031,7 +1060,7 @@ mod tests {
         config.sandbox.network.policy = NetworkPolicy::Allowlist;
         config.sandbox.network.allowed = vec!["github.com".to_string(), "crates.io".to_string()];
 
-        let runner = SandboxRunner::new(config.clone(), Provider::Cursor, config.agent.clone());
+        let runner = DockerSandbox::new(config.clone(), Provider::Cursor, config.agent.clone());
 
         // Build container config
         let temp_dir = tempfile::tempdir().unwrap();
@@ -1054,7 +1083,7 @@ mod tests {
         config.sandbox.network.policy = NetworkPolicy::Allowlist;
         config.sandbox.network.allowed = Vec::new();
 
-        let runner = SandboxRunner::new(config.clone(), Provider::Cursor, config.agent.clone());
+        let runner = DockerSandbox::new(config.clone(), Provider::Cursor, config.agent.clone());
 
         // Build container config - should still add NET_ADMIN
         let temp_dir = tempfile::tempdir().unwrap();
@@ -1073,7 +1102,7 @@ mod tests {
         // This test verifies the persistent container creation function can be called
         // It will skip if Docker is not available
         let config = Config::default();
-        let runner = SandboxRunner::new(config.clone(), Provider::Cursor, config.agent.clone());
+        let runner = DockerSandbox::new(config.clone(), Provider::Cursor, config.agent.clone());
 
         let temp_dir = tempfile::tempdir().unwrap();
         let result = runner.create_persistent_container(temp_dir.path()).await;
@@ -1085,7 +1114,7 @@ mod tests {
                 assert!(container_name.starts_with("ralph-"));
 
                 // Clean up the container
-                let _ = SandboxRunner::remove_persistent_container(&container_name).await;
+                let _ = DockerSandbox::remove_persistent_container(&container_name).await;
             }
             Err(e) => {
                 // Docker not available or image not found - this is acceptable in test environments
@@ -1107,7 +1136,7 @@ mod tests {
     async fn test_remove_persistent_container() {
         // This test verifies the container removal function can be called
         // It will skip if Docker is not available
-        let result = SandboxRunner::remove_persistent_container("nonexistent-container").await;
+        let result = DockerSandbox::remove_persistent_container("nonexistent-container").await;
 
         match result {
             Ok(()) => {
@@ -1136,7 +1165,7 @@ mod tests {
         }
 
         let result =
-            SandboxRunner::check_container_health(&docker, "nonexistent-container-xyz").await;
+            DockerSandbox::check_container_health(&docker, "nonexistent-container-xyz").await;
 
         // Should fail with inspection error
         assert!(result.is_err());
@@ -1153,7 +1182,7 @@ mod tests {
     async fn test_check_container_health_running_container() {
         // Integration test: create a container, verify health check passes
         let config = Config::default();
-        let runner = SandboxRunner::new(config.clone(), Provider::Cursor, config.agent.clone());
+        let runner = DockerSandbox::new(config.clone(), Provider::Cursor, config.agent.clone());
 
         let temp_dir = tempfile::tempdir().unwrap();
 
@@ -1164,18 +1193,18 @@ mod tests {
 
         // Health check should pass for running container
         let docker = Docker::connect_with_local_defaults().unwrap();
-        let result = SandboxRunner::check_container_health(&docker, &container_name).await;
+        let result = DockerSandbox::check_container_health(&docker, &container_name).await;
         assert!(result.is_ok(), "Health check failed: {result:?}");
 
         // Clean up
-        let _ = SandboxRunner::remove_persistent_container(&container_name).await;
+        let _ = DockerSandbox::remove_persistent_container(&container_name).await;
     }
 
     #[tokio::test]
     async fn test_check_container_health_stopped_container() {
         // Integration test: create a container, stop it, verify health check restarts it
         let config = Config::default();
-        let runner = SandboxRunner::new(config.clone(), Provider::Cursor, config.agent.clone());
+        let runner = DockerSandbox::new(config.clone(), Provider::Cursor, config.agent.clone());
 
         let temp_dir = tempfile::tempdir().unwrap();
 
@@ -1190,7 +1219,7 @@ mod tests {
         let _ = docker.stop_container(&container_name, None).await;
 
         // Health check should restart it
-        let result = SandboxRunner::check_container_health(&docker, &container_name).await;
+        let result = DockerSandbox::check_container_health(&docker, &container_name).await;
         assert!(result.is_ok(), "Health check failed to restart: {result:?}");
 
         // Verify container is now running
@@ -1202,7 +1231,7 @@ mod tests {
         assert!(running, "Container should be running after health check");
 
         // Clean up
-        let _ = SandboxRunner::remove_persistent_container(&container_name).await;
+        let _ = DockerSandbox::remove_persistent_container(&container_name).await;
     }
 
     #[test]

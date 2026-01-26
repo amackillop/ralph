@@ -14,7 +14,7 @@ use crate::agent::{AgentProvider, ClaudeProvider, CursorProvider, Provider};
 use crate::config::Config;
 use crate::detection::CompletionDetector;
 use crate::notifications::{NotificationDetails, NotificationEvent, Notifier};
-use crate::sandbox::{SandboxError, SandboxRunner};
+use crate::sandbox::{DockerSandbox, Sandbox, SandboxError};
 use crate::state::{Mode, RalphState};
 
 // -----------------------------------------------------------------------------
@@ -58,9 +58,26 @@ pub(crate) async fn run(
     let banner = BannerInfo::new(&state, &prompt_file, no_sandbox, &config, provider);
     print!("{}", format_banner(&banner));
 
+    // Create the agent provider (for non-sandbox mode)
+    let agent: Box<dyn AgentProvider> = match provider {
+        Provider::Cursor => Box::new(CursorProvider::new(config.agent.cursor.clone())),
+        Provider::Claude => Box::new(ClaudeProvider::new(config.agent.claude.clone())),
+    };
+
+    // Create sandbox if enabled
+    let sandbox: Option<Box<dyn Sandbox>> = if banner.sandbox_enabled {
+        Some(Box::new(DockerSandbox::new(
+            config.clone(),
+            provider,
+            config.agent.clone(),
+        )))
+    } else {
+        None
+    };
+
     // Clean up orphaned containers if sandbox is enabled
-    if banner.sandbox_enabled {
-        if let Err(e) = SandboxRunner::cleanup_orphaned_containers().await {
+    if let Some(ref sb) = sandbox {
+        if let Err(e) = sb.cleanup_orphaned().await {
             warn!(
                 "Failed to cleanup orphaned containers: {}. Continuing anyway.",
                 e
@@ -68,31 +85,15 @@ pub(crate) async fn run(
         }
     }
 
-    // Create the agent provider (for non-sandbox mode)
-    let agent: Box<dyn AgentProvider> = match provider {
-        Provider::Cursor => Box::new(CursorProvider::new(config.agent.cursor.clone())),
-        Provider::Claude => Box::new(ClaudeProvider::new(config.agent.claude.clone())),
-    };
-
-    // Create sandbox runner if sandbox is enabled
-    let sandbox_runner = if banner.sandbox_enabled {
-        Some(SandboxRunner::new(
-            config.clone(),
-            provider,
-            config.agent.clone(),
-        ))
-    } else {
-        None
-    };
-
     // Create persistent container if reuse is enabled
     let persistent_container_name = if banner.sandbox_enabled && config.sandbox.reuse_container {
-        match sandbox_runner.as_ref() {
-            Some(runner) => match runner.create_persistent_container(&cwd).await {
-                Ok(name) => {
+        match sandbox.as_ref() {
+            Some(sb) => match sb.create_persistent(&cwd).await {
+                Ok(name) if !name.is_empty() => {
                     info!("Created persistent container: {}", name);
                     Some(name)
                 }
+                Ok(_) => None, // Empty string means no persistence support
                 Err(e) => {
                     warn!(
                         "Failed to create persistent container: {}. Falling back to per-iteration containers.",
@@ -185,9 +186,8 @@ pub(crate) async fn run(
             agent.name(),
             state.iteration
         );
-        let output_result = if let Some(ref sandbox) = sandbox_runner {
-            sandbox
-                .run(&cwd, &prompt, persistent_container_name.as_deref())
+        let output_result = if let Some(ref sb) = sandbox {
+            sb.run(&cwd, &prompt, persistent_container_name.as_deref())
                 .await
         } else {
             // Non-sandbox mode: apply timeout (provider-specific > global)
@@ -310,9 +310,10 @@ pub(crate) async fn run(
                         && state.consecutive_errors >= config.monitoring.max_consecutive_errors
                     {
                         // Clean up persistent container before bailing
-                        if let Some(container_name) = &persistent_container_name {
-                            let _ =
-                                SandboxRunner::remove_persistent_container(container_name).await;
+                        if let (Some(container_name), Some(sb)) =
+                            (&persistent_container_name, &sandbox)
+                        {
+                            let _ = sb.remove_persistent(container_name).await;
                         }
                         bail!(
                             "Circuit breaker triggered: {} consecutive errors (limit: {}). \
@@ -333,8 +334,8 @@ pub(crate) async fn run(
                 }
 
                 // For other errors, fail the loop (but cleanup container first)
-                if let Some(container_name) = &persistent_container_name {
-                    let _ = SandboxRunner::remove_persistent_container(container_name).await;
+                if let (Some(container_name), Some(sb)) = (&persistent_container_name, &sandbox) {
+                    let _ = sb.remove_persistent(container_name).await;
                 }
                 return Err(e).context("Agent execution failed");
             }
@@ -394,9 +395,10 @@ pub(crate) async fn run(
                         && state.consecutive_errors >= config.monitoring.max_consecutive_errors
                     {
                         // Clean up persistent container before bailing
-                        if let Some(container_name) = &persistent_container_name {
-                            let _ =
-                                SandboxRunner::remove_persistent_container(container_name).await;
+                        if let (Some(container_name), Some(sb)) =
+                            (&persistent_container_name, &sandbox)
+                        {
+                            let _ = sb.remove_persistent(container_name).await;
                         }
                         bail!(
                             "Circuit breaker triggered: {} consecutive validation errors (limit: {}). \
@@ -511,9 +513,9 @@ pub(crate) async fn run(
     }
 
     // Clean up persistent container if it was created
-    if let Some(container_name) = persistent_container_name {
+    if let (Some(container_name), Some(sb)) = (persistent_container_name, &sandbox) {
         info!("Cleaning up persistent container: {}", container_name);
-        if let Err(e) = SandboxRunner::remove_persistent_container(&container_name).await {
+        if let Err(e) = sb.remove_persistent(&container_name).await {
             warn!(
                 "Failed to remove persistent container {}: {}",
                 container_name, e
