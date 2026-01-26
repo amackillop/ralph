@@ -203,6 +203,12 @@ pub(crate) struct SandboxConfig {
     #[serde(default)]
     pub mounts: Vec<Mount>,
 
+    /// Credential paths to auto-mount if they exist.
+    /// Provides access to package registries, git config, SSH keys, etc.
+    /// Set to empty list to disable auto-mounting.
+    #[serde(default = "default_credential_mounts")]
+    pub credential_mounts: Vec<Mount>,
+
     /// Network configuration
     #[serde(default)]
     pub network: NetworkConfig,
@@ -220,6 +226,7 @@ impl Default for SandboxConfig {
             reuse_container: false,
             use_local_image: true,
             mounts: Vec::new(),
+            credential_mounts: default_credential_mounts(),
             network: NetworkConfig::default(),
             resources: ResourceConfig::default(),
         }
@@ -227,7 +234,7 @@ impl Default for SandboxConfig {
 }
 
 /// Volume mount configuration for Docker containers.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub(crate) struct Mount {
     /// Host path to mount.
     pub host: String,
@@ -236,6 +243,38 @@ pub(crate) struct Mount {
     /// Whether the mount is read-only.
     #[serde(default = "default_true")]
     pub readonly: bool,
+}
+
+/// Default credential mounts: common paths that are auto-mounted if they exist.
+/// These provide access to package registries, git config, and SSH keys.
+fn default_credential_mounts() -> Vec<Mount> {
+    vec![
+        Mount {
+            host: "~/.ssh".to_string(),
+            container: "/root/.ssh".to_string(),
+            readonly: true,
+        },
+        Mount {
+            host: "~/.gitconfig".to_string(),
+            container: "/root/.gitconfig".to_string(),
+            readonly: true,
+        },
+        Mount {
+            host: "~/.npmrc".to_string(),
+            container: "/root/.npmrc".to_string(),
+            readonly: true,
+        },
+        Mount {
+            host: "~/.cargo/credentials.toml".to_string(),
+            container: "/root/.cargo/credentials.toml".to_string(),
+            readonly: true,
+        },
+        Mount {
+            host: "~/.pypirc".to_string(),
+            container: "/root/.pypirc".to_string(),
+            readonly: true,
+        },
+    ]
 }
 
 /// Network access policy for sandbox containers.
@@ -765,5 +804,48 @@ log_rotation = "never"
 "#;
         let config: Config = toml::from_str(toml).unwrap();
         assert_eq!(config.monitoring.log_rotation, LogRotation::Never);
+    }
+
+    #[test]
+    fn test_credential_mounts_default() {
+        let config = Config::default();
+        assert!(!config.sandbox.credential_mounts.is_empty());
+        // Check that common paths are in defaults
+        let hosts: Vec<_> = config
+            .sandbox
+            .credential_mounts
+            .iter()
+            .map(|m| m.host.as_str())
+            .collect();
+        assert!(hosts.contains(&"~/.ssh"));
+        assert!(hosts.contains(&"~/.gitconfig"));
+        assert!(hosts.contains(&"~/.npmrc"));
+        assert!(hosts.contains(&"~/.cargo/credentials.toml"));
+    }
+
+    #[test]
+    fn test_credential_mounts_custom() {
+        let toml = r#"
+[sandbox]
+credential_mounts = [
+    { host = "~/.aws/credentials", container = "/root/.aws/credentials", readonly = true }
+]
+"#;
+        let config: Config = toml::from_str(toml).unwrap();
+        assert_eq!(config.sandbox.credential_mounts.len(), 1);
+        assert_eq!(
+            config.sandbox.credential_mounts[0].host,
+            "~/.aws/credentials"
+        );
+    }
+
+    #[test]
+    fn test_credential_mounts_disabled() {
+        let toml = r"
+[sandbox]
+credential_mounts = []
+";
+        let config: Config = toml::from_str(toml).unwrap();
+        assert!(config.sandbox.credential_mounts.is_empty());
     }
 }
