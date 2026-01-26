@@ -1,86 +1,55 @@
 # Ralph - Operational Guide
 
-## Project Overview
-
 ralph is a Rust CLI tool implementing the Ralph Wiggum technique for iterative AI development.
 
-## Build & Run
+## Commands
+
+Run `just --list` for available commands. Key recipes:
+
+- `just check` - Run all checks (build + clippy + fmt + test)
+- `just coverage` - Check coverage meets threshold
+- `just fmt` - Fix formatting
+- `just fix` - Auto-fix clippy lints
+- `just test` - Run tests
+
+
+## Change Validation
+
+Before committing, run:
 
 ```bash
-# Enter development shell (provides Rust toolchain)
-nix develop
-
-# Build
-cargo build
-
-# Run
-cargo run -- --help
-
-# Or build with Nix
-nix build
-./result/bin/ralph --help
+just check && just coverage
 ```
 
-## Validation
+Both must pass. If checks fail:
+1. `just fmt` - Fix formatting issues
+2. `just fix` - Auto-fix clippy lints
+3. Fix remaining errors manually
 
-Run these commands to validate changes:
+Do not commit failing code.
 
-```bash
-# Format code
-cargo fmt
+## Commit Guidelines
 
-# Run clippy (lints)
-cargo clippy --all-targets -- -D warnings
+Work in atomic, focused commits. Each commit should represent a single logical change.
 
-# Run tests
-cargo test
+**Only commit when:**
+1. `just check` passes
+2. `just coverage` meets threshold
 
-# Check coverage (required - must meet configured threshold)
-nix run .#coverage
+ Follow the seven rules:
 
-# Full Nix check (build + clippy + fmt + test)
-nix flake check
-```
+- Separate subject from body with blank line
+- Limit subject to 50 characters (72 hard limit)
+- Capitalize subject line
+- No period at end of subject
+- Use imperative mood in subject (e.g., "Fix bug" not "Fixed bug" or "Fixes bug")
+- Wrap body at 72 characters
+- Body explains what and why, not how
+- The diff explains how
 
-## Project Structure
+Subject test: "If applied, this commit will [subject]" must make sense.
 
-```
-src/
-├── main.rs           # CLI entry point (clap)
-├── agent/            # AI agent providers
-│   ├── mod.rs        # AgentProvider trait
-│   ├── cursor.rs     # Cursor CLI provider
-│   └── claude.rs     # Claude CLI provider
-├── commands/         # CLI subcommands
-│   ├── init.rs       # ralph init
-│   ├── loop_cmd.rs   # ralph loop
-│   ├── status.rs     # ralph status
-│   ├── cancel.rs     # ralph cancel
-│   ├── revert.rs     # ralph revert
-│   ├── clean.rs      # ralph clean
-│   └── image.rs      # ralph image (Docker image management)
-├── config.rs         # ralph.toml parsing
-├── state.rs          # Loop state management
-├── detection.rs      # Completion detection
-├── notifications.rs  # Notification hooks (webhook, desktop, sound)
-├── sandbox/          # Docker sandbox
-│   ├── mod.rs        # Sandbox runner
-│   ├── docker.rs     # Docker container management
-│   └── network.rs    # Network policy (allowlist)
-└── templates/        # Embedded template files
-```
+Like how a comment provides important context for a line of code, the commit message
+should provide important context for the change being committed.
 
-## Key Dependencies
-
-- `clap` - CLI argument parsing
-- `tokio` - Async runtime
-- `serde` + `toml` - Config parsing
-- `async-trait` - Async traits for providers
-- `bollard` - Docker API (for sandbox)
-
-## Coding Guidelines
-
-- Use `anyhow::Result` for error handling
-- Add `#[allow(dead_code)]` for intentionally unused code
-- Run `cargo fmt` before committing
-- All clippy warnings must be resolved
+After committing, push immediately.

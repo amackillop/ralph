@@ -18,4 +18,9 @@ Thumbs.db
 result
 result-*
 .direnv/
+
+# Worktrees
+.worktrees/
+.gitconfig
+
 IMPLEMENTATION_PLAN.md

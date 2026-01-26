@@ -130,7 +130,7 @@
           # Allow some pedantic warnings (rust-2024-compatibility issues are handled via #[allow] attributes)
           ralph-clippy = craneLib.cargoClippy (commonArgs // {
             inherit cargoArtifacts;
-            cargoClippyExtraArgs = "--all-targets -- --deny warnings --allow clippy::unused-async --allow clippy::similar-names";
+            cargoClippyExtraArgs = "--all-targets -- --deny warnings ";
           });
 
           # Check formatting

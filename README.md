@@ -61,13 +61,6 @@ nix develop
 
 # Or use direnv (recommended)
 direnv allow
-
-# Available in the dev shell:
-# - Rust stable toolchain (rustc, cargo, rustfmt, clippy)
-# - rust-analyzer (LSP)
-# - cargo-watch, cargo-edit, cargo-audit, cargo-outdated
-# - docker, docker-compose
-# - git, jq, just
 ```
 
 Run checks:
