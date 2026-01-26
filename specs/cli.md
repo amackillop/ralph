@@ -12,6 +12,11 @@ Initialize a project for Ralph:
 - Creates `AGENTS.md` template
 - Prints instructions to create `specs/` directory
 
+```bash
+ralph init           # Initialize (fails if files exist)
+ralph init --force   # Overwrite existing files
+```
+
 ### `ralph loop <mode>`
 
 Run the main Ralph loop:
@@ -24,6 +29,7 @@ ralph loop build -c "ALL TESTS PASS"         # Stop on promise (--completion-pro
 ralph loop build --provider claude           # Override provider
 ralph loop build --no-sandbox                # Disable sandbox
 ralph loop build --unlimited                 # No iteration limit
+ralph loop build -p custom_prompt.md         # Custom prompt file (--prompt)
 ```
 
 ### `ralph status`
@@ -36,18 +42,34 @@ Stop a running loop gracefully.
 
 ### `ralph revert`
 
-Revert uncommitted changes from failed iteration.
+Revert Ralph commits from failed iterations:
+
+```bash
+ralph revert                # Revert last commit (default)
+ralph revert --last 3       # Revert last 3 commits
+```
 
 ### `ralph clean`
 
-Remove Ralph state files (`.ralph/state.toml`).
+Remove Ralph state files:
+
+```bash
+ralph clean        # Remove .ralph/state.toml only
+ralph clean --all  # Also remove prompt and rules files
+```
 
 ### `ralph image <subcommand>`
 
 Manage sandbox Docker image:
-- `ralph image build` — Build from flake.nix
-- `ralph image pull` — Pull pre-built image
-- `ralph image status` — Show image info
+
+```bash
+ralph image build                    # Build from flake.nix (default)
+ralph image build --dockerfile ./Dockerfile --tag myimage:v1
+ralph image pull                     # Pull image (skips if exists locally)
+ralph image pull --image ghcr.io/org/ralph:latest --force
+ralph image status                   # Show configured image info
+ralph image status --image custom:tag
+```
 
 ## Configuration
 
