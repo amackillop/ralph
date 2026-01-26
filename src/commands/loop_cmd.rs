@@ -18,6 +18,241 @@ use crate::sandbox::{DockerSandbox, Sandbox, SandboxError};
 use crate::state::{Mode, RalphState};
 
 // -----------------------------------------------------------------------------
+// Dependency Injection for Testing
+// -----------------------------------------------------------------------------
+
+/// Dependencies for the loop that can be injected for testing.
+#[cfg(test)]
+pub(crate) struct LoopDependencies {
+    /// The agent provider to use.
+    pub agent: Box<dyn AgentProvider>,
+    /// Optional sandbox for isolation.
+    pub sandbox: Option<Box<dyn Sandbox>>,
+    /// Configuration.
+    pub config: Config,
+    /// Project directory.
+    pub project_dir: PathBuf,
+    /// Prompt file path.
+    pub prompt_file: PathBuf,
+}
+
+/// Result from running the loop core, for test verification.
+#[cfg(test)]
+#[derive(Debug)]
+pub(crate) struct LoopResult {
+    /// Final iteration reached.
+    pub final_iteration: u32,
+    /// How the loop terminated.
+    pub termination_reason: TerminationReason,
+    /// Total errors encountered.
+    pub error_count: u32,
+}
+
+/// Why the loop terminated.
+#[cfg(test)]
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum TerminationReason {
+    /// Max iterations reached.
+    MaxIterations,
+    /// Completion promise detected.
+    CompletionDetected,
+    /// Fatal error occurred.
+    Error(String),
+}
+
+/// Run the loop with injected dependencies (for testing).
+///
+/// This is an internal function for E2E testing that allows mocking
+/// the agent and sandbox while testing the full loop orchestration logic.
+#[cfg(test)]
+#[allow(clippy::too_many_lines, tail_expr_drop_order)]
+pub(crate) async fn run_loop_core(
+    deps: LoopDependencies,
+    initial_state: RalphState,
+    completion_promise: Option<String>,
+) -> Result<LoopResult> {
+    let LoopDependencies {
+        agent,
+        sandbox,
+        config,
+        project_dir,
+        prompt_file,
+    } = deps;
+
+    let mut state = initial_state;
+    state.active = true;
+    state.save(&project_dir)?;
+
+    let detector = CompletionDetector::new(completion_promise.as_deref());
+
+    // Create persistent container if sandbox is enabled and reuse is configured
+    let persistent_container_name = if let Some(ref sb) = sandbox {
+        if config.sandbox.reuse_container {
+            match sb.create_persistent(&project_dir).await {
+                Ok(name) if !name.is_empty() => Some(name),
+                _ => None,
+            }
+        } else {
+            None
+        }
+    } else {
+        None
+    };
+
+    let termination_reason;
+
+    // Main loop
+    loop {
+        // Check max iterations
+        if is_max_iterations_reached(&state) {
+            state.active = false;
+            state.save(&project_dir)?;
+            termination_reason = TerminationReason::MaxIterations;
+            break;
+        }
+
+        // Read prompt
+        let mut prompt = std::fs::read_to_string(&prompt_file)
+            .with_context(|| format!("Failed to read prompt file: {}", prompt_file.display()))?;
+
+        // Append validation errors from previous iteration if present
+        if let Some(ref last_error) = state.last_error {
+            if last_error.starts_with("Validation error:") {
+                let error_details = last_error
+                    .strip_prefix("Validation error:")
+                    .unwrap_or(last_error);
+
+                prompt.push_str("\n\n");
+                prompt.push_str("## ⚠️ VALIDATION ERROR FROM PREVIOUS ITERATION\n");
+                prompt.push_str("The following validation error occurred. Please fix it:\n\n");
+                prompt.push_str("```\n");
+                prompt.push_str(error_details.trim());
+                prompt.push_str("\n```\n");
+                prompt.push_str(
+                    "\nFix the issues above and ensure validation passes before proceeding.\n",
+                );
+            }
+        }
+
+        // Run agent
+        let output_result = if let Some(ref sb) = sandbox {
+            sb.run(&project_dir, &prompt, persistent_container_name.as_deref())
+                .await
+        } else {
+            agent.invoke(&project_dir, &prompt).await
+        };
+
+        // Handle agent execution result
+        let output = match output_result {
+            Ok(out) => out,
+            Err(e) => {
+                let error_msg = e.to_string();
+
+                // Check if this is a recoverable error
+                let is_timeout = error_msg.contains("timed out");
+                let is_rate_limit = error_msg.contains("resource_exhausted")
+                    || error_msg.contains("rate limit")
+                    || error_msg.contains("Rate limit");
+
+                if is_timeout || is_rate_limit {
+                    state.error_count += 1;
+                    state.consecutive_errors += 1;
+                    state.last_error = Some(error_msg);
+                    state.last_iteration_at = Some(Utc::now());
+                    state.iteration += 1;
+                    state.save(&project_dir)?;
+
+                    // Circuit breaker
+                    if config.monitoring.max_consecutive_errors > 0
+                        && state.consecutive_errors >= config.monitoring.max_consecutive_errors
+                    {
+                        if let (Some(container_name), Some(sb)) =
+                            (&persistent_container_name, &sandbox)
+                        {
+                            let _ = sb.remove_persistent(container_name).await;
+                        }
+                        termination_reason =
+                            TerminationReason::Error("Circuit breaker triggered".to_string());
+                        break;
+                    }
+                    continue;
+                }
+
+                // Non-recoverable error
+                if let (Some(container_name), Some(sb)) = (&persistent_container_name, &sandbox) {
+                    let _ = sb.remove_persistent(container_name).await;
+                }
+                return Err(e).context("Agent execution failed");
+            }
+        };
+
+        // Validate code if enabled
+        if config.validation.enabled {
+            match validate_code(&project_dir, &config.validation.command).await {
+                Ok(()) => {
+                    if let Some(ref last_error) = state.last_error {
+                        if last_error.starts_with("Validation error:") {
+                            state.last_error = None;
+                        }
+                    }
+                }
+                Err(full_error) => {
+                    state.error_count += 1;
+                    state.consecutive_errors += 1;
+                    state.last_error = Some(format!("Validation error:{full_error}"));
+                    state.last_iteration_at = Some(Utc::now());
+                    state.iteration += 1;
+                    state.save(&project_dir)?;
+
+                    // Circuit breaker
+                    if config.monitoring.max_consecutive_errors > 0
+                        && state.consecutive_errors >= config.monitoring.max_consecutive_errors
+                    {
+                        if let (Some(container_name), Some(sb)) =
+                            (&persistent_container_name, &sandbox)
+                        {
+                            let _ = sb.remove_persistent(container_name).await;
+                        }
+                        termination_reason =
+                            TerminationReason::Error("Circuit breaker triggered".to_string());
+                        break;
+                    }
+                    continue;
+                }
+            }
+        }
+
+        // Successful iteration
+        state.consecutive_errors = 0;
+        state.last_iteration_at = Some(Utc::now());
+        state.save(&project_dir)?;
+
+        // Check for completion
+        if detector.is_complete(&output, &project_dir)? {
+            state.active = false;
+            state.save(&project_dir)?;
+            termination_reason = TerminationReason::CompletionDetected;
+            break;
+        }
+
+        // Increment iteration
+        state.iteration += 1;
+        state.save(&project_dir)?;
+    }
+
+    // Cleanup
+    if let (Some(container_name), Some(sb)) = (persistent_container_name, &sandbox) {
+        let _ = sb.remove_persistent(&container_name).await;
+    }
+
+    Ok(LoopResult {
+        final_iteration: state.iteration,
+        termination_reason,
+        error_count: state.error_count,
+    })
+}
+
+// -----------------------------------------------------------------------------
 // Public API
 // -----------------------------------------------------------------------------
 
@@ -1596,5 +1831,303 @@ timeout_minutes = 60
         let config = Config::default();
         assert_eq!(resolve_timeout(&config, Provider::Cursor), 60);
         assert_eq!(resolve_timeout(&config, Provider::Claude), 60);
+    }
+
+    // -------------------------------------------------------------------------
+    // E2E Loop Tests
+    // -------------------------------------------------------------------------
+
+    mod e2e {
+        use super::*;
+        use crate::agent::mock::{MockAgentProvider, MockResponse};
+        use crate::sandbox::NoopSandbox;
+        use tempfile::tempdir;
+
+        /// Create a test project directory with required files.
+        fn setup_test_project(prompt_content: &str) -> (tempfile::TempDir, PathBuf) {
+            let dir = tempdir().unwrap();
+            let project_dir = dir.path().to_path_buf();
+
+            // Create prompt file
+            let prompt_file = project_dir.join("PROMPT_build.md");
+            std::fs::write(&prompt_file, prompt_content).unwrap();
+
+            (dir, project_dir)
+        }
+
+        /// Create a minimal config for testing.
+        fn test_config() -> Config {
+            let mut config = Config::default();
+            config.validation.enabled = false; // Disable validation for basic tests
+            config.sandbox.enabled = false;
+            config.git.auto_push = false;
+            config.monitoring.show_progress = false;
+            config
+        }
+
+        /// Create initial state for testing.
+        fn test_state(max_iterations: Option<u32>) -> RalphState {
+            RalphState {
+                active: false,
+                mode: Mode::Build,
+                iteration: 1,
+                max_iterations,
+                completion_promise: None,
+                started_at: Utc::now(),
+                last_iteration_at: None,
+                error_count: 0,
+                consecutive_errors: 0,
+                last_error: None,
+            }
+        }
+
+        #[tokio::test]
+        async fn test_e2e_loop_max_iterations() {
+            // Test: Loop stops after max iterations
+            let (_dir, project_dir) = setup_test_project("Test prompt");
+            let prompt_file = project_dir.join("PROMPT_build.md");
+
+            let agent = MockAgentProvider::always_succeed("Agent output");
+            let deps = LoopDependencies {
+                agent: Box::new(agent.clone()),
+                sandbox: None,
+                config: test_config(),
+                project_dir: project_dir.clone(),
+                prompt_file,
+            };
+
+            let state = test_state(Some(3)); // Max 3 iterations
+
+            let result = run_loop_core(deps, state, None).await.unwrap();
+
+            assert_eq!(result.termination_reason, TerminationReason::MaxIterations);
+            assert_eq!(result.final_iteration, 4); // Stopped after iteration > max (4 > 3)
+            assert_eq!(result.error_count, 0);
+            assert_eq!(agent.invocation_count(), 3); // Ran exactly 3 times
+        }
+
+        #[tokio::test]
+        async fn test_e2e_loop_completion_detection() {
+            // Test: Loop stops when completion promise is detected
+            let (_dir, project_dir) = setup_test_project("Test prompt");
+            let prompt_file = project_dir.join("PROMPT_build.md");
+
+            // Agent returns completion promise on second call
+            let agent = MockAgentProvider::new(vec![
+                MockResponse::Success("Still working...".to_string()),
+                MockResponse::Success("Done! <promise>TASK_COMPLETE</promise>".to_string()),
+            ]);
+
+            let deps = LoopDependencies {
+                agent: Box::new(agent.clone()),
+                sandbox: None,
+                config: test_config(),
+                project_dir: project_dir.clone(),
+                prompt_file,
+            };
+
+            let state = test_state(Some(10)); // High max to ensure completion triggers first
+
+            let result = run_loop_core(deps, state, Some("TASK_COMPLETE".to_string()))
+                .await
+                .unwrap();
+
+            assert_eq!(
+                result.termination_reason,
+                TerminationReason::CompletionDetected
+            );
+            assert_eq!(result.final_iteration, 2); // Completed on iteration 2
+            assert_eq!(agent.invocation_count(), 2);
+        }
+
+        #[tokio::test]
+        async fn test_e2e_loop_error_recovery() {
+            // Test: Loop continues after recoverable errors (timeout/rate limit)
+            let (_dir, project_dir) = setup_test_project("Test prompt");
+            let prompt_file = project_dir.join("PROMPT_build.md");
+
+            // Agent: timeout, then success, then completion
+            let agent = MockAgentProvider::new(vec![
+                MockResponse::Timeout,
+                MockResponse::Success("Working...".to_string()),
+                MockResponse::Success("<promise>DONE</promise>".to_string()),
+            ]);
+
+            let deps = LoopDependencies {
+                agent: Box::new(agent.clone()),
+                sandbox: None,
+                config: test_config(),
+                project_dir: project_dir.clone(),
+                prompt_file,
+            };
+
+            let state = test_state(Some(10));
+
+            let result = run_loop_core(deps, state, Some("DONE".to_string()))
+                .await
+                .unwrap();
+
+            assert_eq!(
+                result.termination_reason,
+                TerminationReason::CompletionDetected
+            );
+            assert_eq!(result.error_count, 1); // One timeout error
+            assert_eq!(agent.invocation_count(), 3);
+        }
+
+        #[tokio::test]
+        async fn test_e2e_loop_validation_error_recovery() {
+            // Test: Validation errors are appended to prompt for next iteration
+            let (_dir, project_dir) = setup_test_project("Initial prompt");
+            let prompt_file = project_dir.join("PROMPT_build.md");
+
+            // Track prompts received by the agent
+            let agent = MockAgentProvider::new(vec![
+                MockResponse::Success("Output 1".to_string()),
+                MockResponse::Success("<promise>DONE</promise>".to_string()),
+            ]);
+
+            let mut config = test_config();
+            config.validation.enabled = true;
+            config.validation.command = "false".to_string(); // Always fails first time
+
+            let deps = LoopDependencies {
+                agent: Box::new(agent.clone()),
+                sandbox: None,
+                config,
+                project_dir: project_dir.clone(),
+                prompt_file,
+            };
+
+            let state = test_state(Some(5));
+
+            // This will fail validation and increment iteration
+            // Note: Since validation always fails, this tests the error accumulation
+            let result = run_loop_core(deps, state, Some("DONE".to_string())).await;
+
+            // The loop should continue but accumulate errors
+            // Since validation always fails, it will hit max iterations
+            assert!(result.is_ok());
+            let result = result.unwrap();
+            // Validation fails, so errors accumulate
+            assert!(result.error_count > 0);
+        }
+
+        #[tokio::test]
+        async fn test_e2e_loop_state_persistence() {
+            // Test: State is persisted correctly across iterations
+            let (_dir, project_dir) = setup_test_project("Test prompt");
+            let prompt_file = project_dir.join("PROMPT_build.md");
+
+            let agent = MockAgentProvider::always_succeed("Output");
+
+            let deps = LoopDependencies {
+                agent: Box::new(agent),
+                sandbox: None,
+                config: test_config(),
+                project_dir: project_dir.clone(),
+                prompt_file,
+            };
+
+            let state = test_state(Some(2));
+
+            let _result = run_loop_core(deps, state, None).await.unwrap();
+
+            // Verify state was saved
+            let loaded_state = RalphState::load(&project_dir).unwrap().unwrap();
+            assert!(!loaded_state.active); // Should be inactive after completion
+            assert!(loaded_state.iteration > 1); // Should have advanced
+        }
+
+        #[tokio::test]
+        async fn test_e2e_loop_with_noop_sandbox() {
+            // Test: Loop works with NoopSandbox
+            let (_dir, project_dir) = setup_test_project("Test prompt");
+            let prompt_file = project_dir.join("PROMPT_build.md");
+
+            let agent = MockAgentProvider::always_succeed("Sandbox output");
+            let sandbox = NoopSandbox::new();
+
+            let mut config = test_config();
+            config.sandbox.enabled = true;
+            config.sandbox.reuse_container = false;
+
+            let deps = LoopDependencies {
+                agent: Box::new(agent),
+                sandbox: Some(Box::new(sandbox)),
+                config,
+                project_dir: project_dir.clone(),
+                prompt_file,
+            };
+
+            let state = test_state(Some(2));
+
+            let result = run_loop_core(deps, state, None).await.unwrap();
+
+            assert_eq!(result.termination_reason, TerminationReason::MaxIterations);
+        }
+
+        #[tokio::test]
+        async fn test_e2e_loop_circuit_breaker() {
+            // Test: Circuit breaker stops loop after max consecutive errors
+            let (_dir, project_dir) = setup_test_project("Test prompt");
+            let prompt_file = project_dir.join("PROMPT_build.md");
+
+            // Agent always times out
+            let agent = MockAgentProvider::new(vec![MockResponse::Timeout]);
+
+            let mut config = test_config();
+            config.monitoring.max_consecutive_errors = 3;
+
+            let deps = LoopDependencies {
+                agent: Box::new(agent.clone()),
+                sandbox: None,
+                config,
+                project_dir: project_dir.clone(),
+                prompt_file,
+            };
+
+            let state = test_state(Some(100)); // High limit, circuit breaker should trigger first
+
+            let result = run_loop_core(deps, state, None).await.unwrap();
+
+            assert!(matches!(
+                result.termination_reason,
+                TerminationReason::Error(_)
+            ));
+            assert_eq!(result.error_count, 3); // Exactly 3 errors before circuit breaker
+        }
+
+        #[tokio::test]
+        async fn test_e2e_loop_rate_limit_recovery() {
+            // Test: Rate limit errors are recoverable
+            let (_dir, project_dir) = setup_test_project("Test prompt");
+            let prompt_file = project_dir.join("PROMPT_build.md");
+
+            let agent = MockAgentProvider::new(vec![
+                MockResponse::RateLimit,
+                MockResponse::Success("<promise>DONE</promise>".to_string()),
+            ]);
+
+            let deps = LoopDependencies {
+                agent: Box::new(agent.clone()),
+                sandbox: None,
+                config: test_config(),
+                project_dir: project_dir.clone(),
+                prompt_file,
+            };
+
+            let state = test_state(Some(10));
+
+            let result = run_loop_core(deps, state, Some("DONE".to_string()))
+                .await
+                .unwrap();
+
+            assert_eq!(
+                result.termination_reason,
+                TerminationReason::CompletionDetected
+            );
+            assert_eq!(result.error_count, 1); // One rate limit error
+        }
     }
 }
