@@ -515,15 +515,44 @@ impl SandboxRunner {
     }
 }
 
-/// Builds the iptables setup script for allowlist network policy.
-/// The script will:
-/// 1. Flush existing OUTPUT chain rules
-/// 2. Allow loopback traffic
-/// 3. Allow DNS (port 53 UDP/TCP)
-/// 4. For each allowed domain, resolve to IPs and allow those IPs
-/// 5. Block all other outbound traffic
-fn build_iptables_script(allowed: &[String]) -> String {
-    let mut script = String::from("#!/bin/bash\nset -e\n\n");
+/// Bash helper function that routes IP addresses to iptables or ip6tables.
+/// Detects IPv6 by presence of colon, validates IPv4 format.
+const IPTABLES_ADD_IP_RULE_FN: &str = r#"# Helper function to add firewall rule for an IP address
+add_ip_rule() {
+  local ip="$1"
+  local domain="$2"
+  # Detect IPv6 by presence of colon
+  if [[ "$ip" == *:* ]]; then
+    # IPv6 address
+    if [ "$HAS_IP6TABLES" -eq 1 ]; then
+      if ip6tables -A OUTPUT -d "$ip" -j ACCEPT 2>/dev/null; then
+        echo "Allowed IPv6 $ip for $domain"
+      else
+        echo "Warning: Failed to add rule for IPv6 $ip" >&2
+      fi
+    else
+      echo "Warning: Skipping IPv6 $ip (ip6tables not available)" >&2
+    fi
+  else
+    # IPv4 address - validate format
+    if [[ $ip =~ ^[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}$ ]]; then
+      if iptables -A OUTPUT -d "$ip" -j ACCEPT 2>/dev/null; then
+        echo "Allowed IPv4 $ip for $domain"
+      else
+        echo "Warning: Failed to add rule for IPv4 $ip" >&2
+      fi
+    else
+      echo "Warning: Invalid IP format: $ip" >&2
+    fi
+  fi
+}
+
+"#;
+
+/// Writes the base firewall setup: availability checks, flush, default policy,
+/// loopback, DNS, and established connection rules for both IPv4 and IPv6.
+fn write_iptables_base_rules(script: &mut String) {
+    // Check iptables availability (required)
     script.push_str("# Check if iptables is available\n");
     script.push_str("if ! command -v iptables &> /dev/null; then\n");
     script.push_str(
@@ -531,19 +560,72 @@ fn build_iptables_script(allowed: &[String]) -> String {
     );
     script.push_str("  exit 1\n");
     script.push_str("fi\n\n");
-    script.push_str("# Flush OUTPUT chain\n");
+
+    // Check ip6tables availability (optional but recommended)
+    script.push_str("# Check if ip6tables is available for IPv6 support\n");
+    script.push_str("HAS_IP6TABLES=0\n");
+    script.push_str("if command -v ip6tables &> /dev/null; then\n");
+    script.push_str("  HAS_IP6TABLES=1\n");
+    script.push_str("else\n");
+    script.push_str(
+        "  echo 'Warning: ip6tables not found. IPv6 traffic will not be filtered.' >&2\n",
+    );
+    script.push_str("fi\n\n");
+
+    // Flush and set default policy - IPv4
+    script.push_str("# Flush OUTPUT chain and set default DROP policy (IPv4)\n");
     script.push_str("iptables -F OUTPUT\n");
     script.push_str("iptables -P OUTPUT DROP\n\n");
 
-    script.push_str("# Allow loopback\n");
-    script.push_str("iptables -A OUTPUT -o lo -j ACCEPT\n\n");
+    // Flush and set default policy - IPv6 (if available)
+    script.push_str("# Flush OUTPUT chain and set default DROP policy (IPv6)\n");
+    script.push_str("if [ \"$HAS_IP6TABLES\" -eq 1 ]; then\n");
+    script.push_str("  ip6tables -F OUTPUT\n");
+    script.push_str("  ip6tables -P OUTPUT DROP\n");
+    script.push_str("fi\n\n");
 
-    script.push_str("# Allow DNS (UDP and TCP)\n");
+    // Allow loopback - IPv4 and IPv6
+    script.push_str("# Allow loopback (IPv4 and IPv6)\n");
+    script.push_str("iptables -A OUTPUT -o lo -j ACCEPT\n");
+    script.push_str("if [ \"$HAS_IP6TABLES\" -eq 1 ]; then\n");
+    script.push_str("  ip6tables -A OUTPUT -o lo -j ACCEPT\n");
+    script.push_str("fi\n\n");
+
+    // Allow DNS - IPv4 and IPv6
+    script.push_str("# Allow DNS (UDP and TCP) - IPv4 and IPv6\n");
     script.push_str("iptables -A OUTPUT -p udp --dport 53 -j ACCEPT\n");
-    script.push_str("iptables -A OUTPUT -p tcp --dport 53 -j ACCEPT\n\n");
+    script.push_str("iptables -A OUTPUT -p tcp --dport 53 -j ACCEPT\n");
+    script.push_str("if [ \"$HAS_IP6TABLES\" -eq 1 ]; then\n");
+    script.push_str("  ip6tables -A OUTPUT -p udp --dport 53 -j ACCEPT\n");
+    script.push_str("  ip6tables -A OUTPUT -p tcp --dport 53 -j ACCEPT\n");
+    script.push_str("fi\n\n");
 
-    script.push_str("# Allow established connections\n");
-    script.push_str("iptables -A OUTPUT -m state --state ESTABLISHED,RELATED -j ACCEPT\n\n");
+    // Allow established connections - IPv4 and IPv6
+    script.push_str("# Allow established connections (IPv4 and IPv6)\n");
+    script.push_str("iptables -A OUTPUT -m state --state ESTABLISHED,RELATED -j ACCEPT\n");
+    script.push_str("if [ \"$HAS_IP6TABLES\" -eq 1 ]; then\n");
+    script.push_str("  ip6tables -A OUTPUT -m state --state ESTABLISHED,RELATED -j ACCEPT\n");
+    script.push_str("fi\n\n");
+
+    // Add the helper function
+    script.push_str(IPTABLES_ADD_IP_RULE_FN);
+}
+
+/// Builds the iptables setup script for allowlist network policy.
+/// The script will:
+/// 1. Flush existing OUTPUT chain rules (IPv4 and IPv6)
+/// 2. Allow loopback traffic
+/// 3. Allow DNS (port 53 UDP/TCP)
+/// 4. For each allowed domain, resolve to IPs and allow those IPs
+/// 5. Block all other outbound traffic
+///
+/// IPv6 traffic is handled via ip6tables if available. If ip6tables
+/// is not present, IPv6 traffic will not be explicitly blocked but
+/// IPv6 addresses from DNS will be skipped with a warning.
+fn build_iptables_script(allowed: &[String]) -> String {
+    let mut script = String::from("#!/bin/bash\nset -e\n\n");
+
+    write_iptables_base_rules(&mut script);
 
     // For each allowed domain, resolve to IPs and allow them
     script.push_str("# Allow traffic to allowed domains\n");
@@ -563,29 +645,25 @@ fn build_iptables_script(allowed: &[String]) -> String {
             continue;
         }
         writeln!(&mut script, "# Resolve {domain} and allow its IPs").unwrap();
-        // Try multiple DNS resolution methods
+        // Try multiple DNS resolution methods (getent ahosts returns both IPv4 and IPv6)
         writeln!(
             &mut script,
-            "ips=$(getent hosts {domain} 2>/dev/null | awk '{{print $1}}' || getent ahosts {domain} 2>/dev/null | awk '{{print $1}}' | sort -u || echo '')"
+            "ips=$(getent ahosts {domain} 2>/dev/null | awk '{{print $1}}' | sort -u || getent hosts {domain} 2>/dev/null | awk '{{print $1}}' || echo '')"
         )
         .unwrap();
         script.push_str("if [ -z \"$ips\" ]; then\n");
         // Fallback to nslookup if getent fails
         writeln!(
             &mut script,
-            "  ips=$(nslookup {domain} 2>/dev/null | grep -A 1 'Name:' | grep 'Address:' | awk '{{print $2}}' | grep -v '^$' || echo '')"
+            "  ips=$(nslookup {domain} 2>/dev/null | grep -E 'Address:' | tail -n +2 | awk '{{print $2}}' | grep -v '^$' || echo '')"
         )
         .unwrap();
         script.push_str("fi\n");
         script.push_str("if [ -n \"$ips\" ]; then\n");
         script.push_str("  for ip in $ips; do\n");
-        script.push_str("    # Skip empty lines and comments\n");
+        script.push_str("    # Skip empty lines\n");
         script.push_str("    [ -z \"$ip\" ] && continue\n");
-        script.push_str("    # Validate IP format (basic check)\n");
-        script.push_str("    if [[ $ip =~ ^[0-9]{1,3}\\.[0-9]{1,3}\\.[0-9]{1,3}\\.[0-9]{1,3}$ ]] || [[ $ip =~ ^[0-9a-fA-F:]+$ ]]; then\n");
-        script.push_str("      iptables -A OUTPUT -d \"$ip\" -j ACCEPT\n");
-        writeln!(&mut script, "      echo \"Allowed IP $ip for {domain}\"").unwrap();
-        script.push_str("    fi\n");
+        writeln!(&mut script, "    add_ip_rule \"$ip\" \"{domain}\"").unwrap();
         script.push_str("  done\n");
         writeln!(
             &mut script,
@@ -993,5 +1071,42 @@ mod tests {
         assert!(script.contains("-o lo -j ACCEPT")); // loopback
         assert!(script.contains("--dport 53")); // DNS
         assert!(script.contains("ESTABLISHED,RELATED")); // stateful
+    }
+
+    #[test]
+    fn test_build_iptables_script_ipv6_support() {
+        let allowed = vec!["github.com".to_string()];
+        let script = build_iptables_script(&allowed);
+
+        // Verify ip6tables availability check
+        assert!(script.contains("HAS_IP6TABLES="));
+        assert!(script.contains("command -v ip6tables"));
+
+        // Verify IPv6 rules mirror IPv4 rules
+        assert!(script.contains("ip6tables -F OUTPUT"));
+        assert!(script.contains("ip6tables -P OUTPUT DROP"));
+        assert!(script.contains("ip6tables -A OUTPUT -o lo -j ACCEPT"));
+        assert!(script.contains("ip6tables -A OUTPUT -p udp --dport 53"));
+        assert!(script.contains("ip6tables -A OUTPUT -p tcp --dport 53"));
+        assert!(
+            script.contains("ip6tables -A OUTPUT -m state --state ESTABLISHED,RELATED -j ACCEPT")
+        );
+
+        // Verify helper function for routing IPv4/IPv6
+        assert!(script.contains("add_ip_rule()"));
+        assert!(script.contains("ip6tables -A OUTPUT -d"));
+
+        // Verify conditional execution based on ip6tables availability
+        assert!(script.contains("if [ \"$HAS_IP6TABLES\" -eq 1 ]"));
+    }
+
+    #[test]
+    fn test_build_iptables_script_uses_getent_ahosts() {
+        // getent ahosts returns both IPv4 and IPv6 addresses
+        let allowed = vec!["example.com".to_string()];
+        let script = build_iptables_script(&allowed);
+
+        // Should prefer getent ahosts over getent hosts for dual-stack support
+        assert!(script.contains("getent ahosts"));
     }
 }
