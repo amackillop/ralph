@@ -250,6 +250,14 @@ mod tests {
     }
 
     #[test]
+    fn test_notification_details_error_with_context() {
+        let ctx = json!({"key": "value"});
+        let details = NotificationDetails::error(None, "err", Some(ctx.clone()));
+        assert_eq!(details.iteration, None);
+        assert_eq!(details.context, Some(ctx));
+    }
+
+    #[test]
     fn test_notifier_creation() {
         let config = NotificationConfig::default();
         let _notifier = Notifier::new(config);
@@ -289,5 +297,102 @@ mod tests {
             on_error: Some("sound".to_string()),
         };
         assert_eq!(config.on_error, Some("sound".to_string()));
+    }
+
+    #[test]
+    fn test_notification_event_equality() {
+        assert_eq!(NotificationEvent::Complete, NotificationEvent::Complete);
+        assert_eq!(NotificationEvent::Error, NotificationEvent::Error);
+        assert_ne!(NotificationEvent::Complete, NotificationEvent::Error);
+    }
+
+    #[test]
+    fn test_notification_event_debug() {
+        assert_eq!(format!("{:?}", NotificationEvent::Complete), "Complete");
+        assert_eq!(format!("{:?}", NotificationEvent::Error), "Error");
+    }
+
+    #[test]
+    fn test_notification_event_clone() {
+        let event = NotificationEvent::Complete;
+        let cloned = event;
+        assert_eq!(event, cloned);
+    }
+
+    #[test]
+    fn test_notification_details_clone() {
+        let details = NotificationDetails::complete(1, 2, "test");
+        let cloned = details.clone();
+        assert_eq!(details.iteration, cloned.iteration);
+        assert_eq!(details.message, cloned.message);
+    }
+
+    #[tokio::test]
+    async fn test_notifier_notify_complete_no_config() {
+        // No on_complete configured - should just return without error
+        let config = NotificationConfig::default();
+        let notifier = Notifier::new(config);
+        let details = NotificationDetails::complete(1, 1, "done");
+        notifier.notify(NotificationEvent::Complete, &details).await;
+    }
+
+    #[tokio::test]
+    async fn test_notifier_notify_error_no_config() {
+        // No on_error configured - should just return without error
+        let config = NotificationConfig::default();
+        let notifier = Notifier::new(config);
+        let details = NotificationDetails::error(Some(1), "err", None);
+        notifier.notify(NotificationEvent::Error, &details).await;
+    }
+
+    #[tokio::test]
+    async fn test_notifier_notify_error_empty_webhook() {
+        // webhook: prefix but empty URL
+        let config = NotificationConfig {
+            on_complete: None,
+            on_error: Some("webhook:".to_string()),
+        };
+        let notifier = Notifier::new(config);
+        let details = NotificationDetails::error(Some(1), "err", None);
+        // Should handle empty URL gracefully
+        notifier.notify(NotificationEvent::Error, &details).await;
+    }
+
+    #[tokio::test]
+    async fn test_notifier_notify_error_sound() {
+        // Sound notification - fires and forgets
+        let config = NotificationConfig {
+            on_complete: None,
+            on_error: Some("sound".to_string()),
+        };
+        let notifier = Notifier::new(config);
+        let details = NotificationDetails::error(Some(1), "err", None);
+        notifier.notify(NotificationEvent::Error, &details).await;
+    }
+
+    #[tokio::test]
+    async fn test_notifier_notify_error_desktop() {
+        // Desktop notification - may fail but shouldn't panic
+        let config = NotificationConfig {
+            on_complete: None,
+            on_error: Some("desktop".to_string()),
+        };
+        let notifier = Notifier::new(config);
+        let details = NotificationDetails::error(Some(1), "err", None);
+        notifier.notify(NotificationEvent::Error, &details).await;
+    }
+
+    #[test]
+    fn test_play_sound_fallback() {
+        // play_sound always succeeds (falls back to bell character)
+        play_sound();
+    }
+
+    #[test]
+    fn test_send_desktop_notification_not_available() {
+        // May fail but should return an error, not panic
+        let result = send_desktop_notification("Test", "Body");
+        // Result depends on system; just verify it doesn't panic
+        let _ = result;
     }
 }

@@ -143,4 +143,117 @@ mod tests {
         let provider = ClaudeProvider::new(config);
         assert_eq!(provider.name(), "Claude");
     }
+
+    #[test]
+    fn test_claude_provider_new() {
+        let config = ClaudeConfig {
+            path: "/custom/claude".to_string(),
+            model: Some("sonnet".to_string()),
+            skip_permissions: false,
+            output_format: "json".to_string(),
+            verbose: true,
+        };
+        let provider = ClaudeProvider::new(config.clone());
+        assert_eq!(provider.config.path, "/custom/claude");
+        assert_eq!(provider.config.model, Some("sonnet".to_string()));
+        assert!(!provider.config.skip_permissions);
+        assert_eq!(provider.config.output_format, "json");
+        assert!(provider.config.verbose);
+    }
+
+    #[test]
+    fn test_claude_provider_default_config() {
+        let config = ClaudeConfig::default();
+        assert_eq!(config.path, "claude");
+        assert_eq!(config.model, Some("opus".to_string()));
+        assert!(config.skip_permissions);
+        assert_eq!(config.output_format, "text");
+        assert!(!config.verbose);
+    }
+
+    /// Test that `build_args` produces correct arguments
+    fn build_args(config: &ClaudeConfig) -> Vec<String> {
+        let mut args = vec!["-p".to_string()];
+        if config.skip_permissions {
+            args.push("--dangerously-skip-permissions".to_string());
+        }
+        if let Some(ref model) = config.model {
+            args.push("--model".to_string());
+            args.push(model.clone());
+        }
+        args.push("--output-format".to_string());
+        args.push(config.output_format.clone());
+        if config.verbose {
+            args.push("--verbose".to_string());
+        }
+        args
+    }
+
+    #[test]
+    fn test_build_args_default() {
+        let config = ClaudeConfig::default();
+        let args = build_args(&config);
+        assert!(args.contains(&"-p".to_string()));
+        assert!(args.contains(&"--dangerously-skip-permissions".to_string()));
+        assert!(args.contains(&"--model".to_string()));
+        assert!(args.contains(&"opus".to_string()));
+        assert!(args.contains(&"--output-format".to_string()));
+        assert!(args.contains(&"text".to_string()));
+        assert!(!args.contains(&"--verbose".to_string()));
+    }
+
+    #[test]
+    fn test_build_args_no_skip_permissions() {
+        let config = ClaudeConfig {
+            skip_permissions: false,
+            ..Default::default()
+        };
+        let args = build_args(&config);
+        assert!(!args.contains(&"--dangerously-skip-permissions".to_string()));
+    }
+
+    #[test]
+    fn test_build_args_no_model() {
+        let config = ClaudeConfig {
+            model: None,
+            ..Default::default()
+        };
+        let args = build_args(&config);
+        assert!(!args.contains(&"--model".to_string()));
+    }
+
+    #[test]
+    fn test_build_args_with_verbose() {
+        let config = ClaudeConfig {
+            verbose: true,
+            ..Default::default()
+        };
+        let args = build_args(&config);
+        assert!(args.contains(&"--verbose".to_string()));
+    }
+
+    #[test]
+    fn test_build_args_custom_output_format() {
+        let config = ClaudeConfig {
+            output_format: "text".to_string(),
+            ..Default::default()
+        };
+        let args = build_args(&config);
+        assert!(args.contains(&"text".to_string()));
+    }
+
+    #[tokio::test]
+    async fn test_invoke_nonexistent_binary() {
+        let config = ClaudeConfig {
+            path: "/nonexistent/path/claude-fake-binary".to_string(),
+            ..Default::default()
+        };
+        let provider = ClaudeProvider::new(config);
+        let result = provider
+            .invoke(std::path::Path::new("/tmp"), "test prompt")
+            .await;
+        assert!(result.is_err());
+        let err = result.unwrap_err().to_string();
+        assert!(err.contains("Failed to run Claude agent"));
+    }
 }

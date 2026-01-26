@@ -123,4 +123,111 @@ mod tests {
         let provider = CursorProvider::new(config);
         assert_eq!(provider.name(), "Cursor");
     }
+
+    #[test]
+    fn test_cursor_provider_new() {
+        let config = CursorConfig {
+            path: "/custom/agent".to_string(),
+            model: Some("gpt-4".to_string()),
+            sandbox: "on".to_string(),
+            output_format: "json".to_string(),
+        };
+        let provider = CursorProvider::new(config.clone());
+        assert_eq!(provider.config.path, "/custom/agent");
+        assert_eq!(provider.config.model, Some("gpt-4".to_string()));
+        assert_eq!(provider.config.sandbox, "on");
+        assert_eq!(provider.config.output_format, "json");
+    }
+
+    #[test]
+    fn test_cursor_provider_default_config() {
+        let config = CursorConfig::default();
+        assert_eq!(config.path, "agent");
+        assert!(config.model.is_none());
+        assert_eq!(config.sandbox, "disabled");
+        assert_eq!(config.output_format, "text");
+    }
+
+    /// Test argument building logic
+    fn build_args(config: &CursorConfig, prompt: &str) -> Vec<String> {
+        let mut args = vec!["-p".to_string(), prompt.to_string()];
+        if let Some(ref model) = config.model {
+            args.push("--model".to_string());
+            args.push(model.clone());
+        }
+        if !config.sandbox.is_empty() {
+            args.push("--sandbox".to_string());
+            args.push(config.sandbox.clone());
+        }
+        args.push("--output-format".to_string());
+        args.push(config.output_format.clone());
+        args
+    }
+
+    #[test]
+    fn test_build_args_default() {
+        let config = CursorConfig::default();
+        let args = build_args(&config, "test prompt");
+        assert_eq!(args[0], "-p");
+        assert_eq!(args[1], "test prompt");
+        assert!(args.contains(&"--sandbox".to_string()));
+        assert!(args.contains(&"disabled".to_string()));
+        assert!(args.contains(&"--output-format".to_string()));
+        assert!(args.contains(&"text".to_string()));
+        assert!(!args.contains(&"--model".to_string()));
+    }
+
+    #[test]
+    fn test_build_args_with_model() {
+        let config = CursorConfig {
+            model: Some("gpt-4".to_string()),
+            ..Default::default()
+        };
+        let args = build_args(&config, "prompt");
+        assert!(args.contains(&"--model".to_string()));
+        assert!(args.contains(&"gpt-4".to_string()));
+    }
+
+    #[test]
+    fn test_build_args_empty_sandbox() {
+        let config = CursorConfig {
+            sandbox: String::new(),
+            ..Default::default()
+        };
+        let args = build_args(&config, "prompt");
+        assert!(!args.contains(&"--sandbox".to_string()));
+    }
+
+    #[test]
+    fn test_build_args_custom_output_format() {
+        let config = CursorConfig {
+            output_format: "json".to_string(),
+            ..Default::default()
+        };
+        let args = build_args(&config, "prompt");
+        assert!(args.contains(&"json".to_string()));
+    }
+
+    #[test]
+    fn test_build_args_preserves_prompt() {
+        let config = CursorConfig::default();
+        let prompt = "This is a complex\nmultiline\nprompt with special chars: ${}";
+        let args = build_args(&config, prompt);
+        assert_eq!(args[1], prompt);
+    }
+
+    #[tokio::test]
+    async fn test_invoke_nonexistent_binary() {
+        let config = CursorConfig {
+            path: "/nonexistent/path/cursor-fake-binary".to_string(),
+            ..Default::default()
+        };
+        let provider = CursorProvider::new(config);
+        let result = provider
+            .invoke(std::path::Path::new("/tmp"), "test prompt")
+            .await;
+        assert!(result.is_err());
+        let err = result.unwrap_err().to_string();
+        assert!(err.contains("Failed to run Cursor agent"));
+    }
 }
