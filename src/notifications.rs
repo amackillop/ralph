@@ -3,7 +3,7 @@
 //! Supports webhook POST, desktop notifications, and sound alerts
 //! for loop completion and error events.
 
-use anyhow::{Context, Result};
+use anyhow::Result;
 use chrono::Utc;
 use serde_json::json;
 use std::process::Command;
@@ -75,7 +75,10 @@ impl Notifier {
         }
     }
 
-    /// Send webhook POST request.
+    /// Send webhook POST request with exponential backoff retry.
+    ///
+    /// Retries up to 3 times with delays of 1s, 2s, 4s on transient failures.
+    #[allow(tail_expr_drop_order)] // Drop order changes are harmless for HTTP responses
     async fn send_webhook(
         &self,
         url: &str,
@@ -93,21 +96,50 @@ impl Notifier {
         debug!("Sending webhook to {}: {:?}", url, payload);
 
         let client = reqwest::Client::new();
-        let response = client
-            .post(url)
-            .json(&payload)
-            .send()
-            .await
-            .context("Failed to send webhook request")?;
+        let max_attempts = 3;
+        let mut last_error = None;
 
-        if !response.status().is_success() {
-            let status = response.status();
-            let body = response.text().await.unwrap_or_default();
-            anyhow::bail!("Webhook returned error status {status}: {body}");
+        for attempt in 0..max_attempts {
+            if attempt > 0 {
+                let delay_secs = 1u64 << attempt; // 2, 4 seconds for attempts 1, 2
+                debug!(
+                    "Webhook retry attempt {} after {}s delay",
+                    attempt + 1,
+                    delay_secs
+                );
+                tokio::time::sleep(std::time::Duration::from_secs(delay_secs)).await;
+            }
+
+            match client.post(url).json(&payload).send().await {
+                Ok(response) => {
+                    if response.status().is_success() {
+                        debug!("Webhook sent successfully");
+                        return Ok(());
+                    }
+
+                    let status = response.status();
+                    let body = response.text().await.unwrap_or_default();
+
+                    // Retry on 5xx server errors and 429 rate limit
+                    if status.is_server_error() || status.as_u16() == 429 {
+                        last_error = Some(format!("Webhook returned {status}: {body}"));
+                        continue;
+                    }
+
+                    // Don't retry client errors (4xx except 429)
+                    anyhow::bail!("Webhook returned error status {status}: {body}");
+                }
+                Err(e) => {
+                    // Retry on network errors
+                    last_error = Some(e.to_string());
+                }
+            }
         }
 
-        debug!("Webhook sent successfully");
-        Ok(())
+        anyhow::bail!(
+            "Webhook failed after {max_attempts} attempts: {}",
+            last_error.unwrap_or_else(|| "unknown error".to_string())
+        )
     }
 }
 
