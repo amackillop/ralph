@@ -116,21 +116,6 @@ impl RalphState {
 
         Ok(())
     }
-
-    /// Delete state file
-    #[allow(dead_code)]
-    pub fn delete(project_dir: &Path) -> Result<bool> {
-        let state_path = project_dir.join(STATE_FILE);
-
-        if state_path.exists() {
-            fs::remove_file(&state_path).with_context(|| {
-                format!("Failed to delete state file: {}", state_path.display())
-            })?;
-            Ok(true)
-        } else {
-            Ok(false)
-        }
-    }
 }
 
 #[cfg(test)]
@@ -212,27 +197,6 @@ mod tests {
         assert!(!loaded.active);
         assert_eq!(loaded.mode, Mode::Plan);
         assert_eq!(loaded.iteration, 1);
-    }
-
-    #[test]
-    fn test_delete_existing() {
-        let dir = tempdir().unwrap();
-        let state = make_state(true, Mode::Build);
-        state.save(dir.path()).unwrap();
-
-        let deleted = RalphState::delete(dir.path()).unwrap();
-        assert!(deleted);
-
-        // Verify it's gone
-        let loaded = RalphState::load(dir.path()).unwrap();
-        assert!(loaded.is_none());
-    }
-
-    #[test]
-    fn test_delete_nonexistent() {
-        let dir = tempdir().unwrap();
-        let deleted = RalphState::delete(dir.path()).unwrap();
-        assert!(!deleted);
     }
 
     #[test]
