@@ -12,6 +12,7 @@ use tracing::{debug, info, warn};
 
 use crate::agent::Provider;
 use crate::config::{AgentConfig, Config};
+use crate::sandbox::network::validate_domain;
 
 /// Runs agents inside a Docker container for isolation.
 pub(crate) struct SandboxRunner {
@@ -547,6 +548,20 @@ fn build_iptables_script(allowed: &[String]) -> String {
     // For each allowed domain, resolve to IPs and allow them
     script.push_str("# Allow traffic to allowed domains\n");
     for domain in allowed {
+        // Validate domain to prevent shell injection
+        if validate_domain(domain).is_none() {
+            writeln!(
+                &mut script,
+                "# SKIPPED invalid domain: (redacted for security)"
+            )
+            .unwrap();
+            writeln!(
+                &mut script,
+                "echo 'Warning: Skipped invalid domain in allowlist' >&2"
+            )
+            .unwrap();
+            continue;
+        }
         writeln!(&mut script, "# Resolve {domain} and allow its IPs").unwrap();
         // Try multiple DNS resolution methods
         writeln!(
@@ -934,5 +949,49 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn test_build_iptables_script_rejects_shell_injection() {
+        // Valid domains should appear in script
+        let allowed = vec!["github.com".to_string(), "api.anthropic.com".to_string()];
+        let script = build_iptables_script(&allowed);
+        assert!(script.contains("github.com"));
+        assert!(script.contains("api.anthropic.com"));
+
+        // Malicious domains should be skipped entirely
+        let malicious = vec![
+            "github.com; rm -rf /".to_string(),
+            "$(whoami).evil.com".to_string(),
+            "`id`.evil.com".to_string(),
+            "valid.com".to_string(), // one valid to ensure script still works
+        ];
+        let script = build_iptables_script(&malicious);
+
+        // Malicious payloads must NOT appear in script
+        assert!(!script.contains("rm -rf"));
+        assert!(!script.contains("$(whoami)"));
+        assert!(!script.contains("`id`"));
+
+        // Valid domain should still be present
+        assert!(script.contains("valid.com"));
+
+        // Should have warning comments for skipped domains
+        assert!(script.contains("SKIPPED invalid domain"));
+    }
+
+    #[test]
+    fn test_build_iptables_script_structure() {
+        let allowed = vec!["example.com".to_string()];
+        let script = build_iptables_script(&allowed);
+
+        // Verify script structure
+        assert!(script.contains("#!/bin/bash"));
+        assert!(script.contains("set -e"));
+        assert!(script.contains("iptables -F OUTPUT"));
+        assert!(script.contains("iptables -P OUTPUT DROP"));
+        assert!(script.contains("-o lo -j ACCEPT")); // loopback
+        assert!(script.contains("--dport 53")); // DNS
+        assert!(script.contains("ESTABLISHED,RELATED")); // stateful
     }
 }
