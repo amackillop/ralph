@@ -240,18 +240,7 @@ mod tests {
         let mock_path = temp_dir.path().join("mock-cursor");
 
         // Shell script: echo the second argument (the prompt after -p)
-        {
-            use std::io::Write;
-            let mut file = std::fs::File::create(&mock_path).unwrap();
-            file.write_all(b"#!/bin/sh\necho \"$2\"\n").unwrap();
-            file.sync_all().unwrap();
-        }
-
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            std::fs::set_permissions(&mock_path, std::fs::Permissions::from_mode(0o755)).unwrap();
-        }
+        crate::agent::create_mock_executable(&mock_path, b"#!/bin/sh\necho \"$2\"\n");
 
         let config = CursorConfig {
             path: mock_path.to_str().unwrap().to_string(),
@@ -275,19 +264,10 @@ mod tests {
         let temp_dir = tempfile::tempdir().unwrap();
         let mock_path = temp_dir.path().join("mock-cursor-fail");
 
-        {
-            use std::io::Write;
-            let mut file = std::fs::File::create(&mock_path).unwrap();
-            file.write_all(b"#!/bin/sh\necho 'Cursor error' >&2\nexit 1\n")
-                .unwrap();
-            file.sync_all().unwrap();
-        }
-
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            std::fs::set_permissions(&mock_path, std::fs::Permissions::from_mode(0o755)).unwrap();
-        }
+        crate::agent::create_mock_executable(
+            &mock_path,
+            b"#!/bin/sh\necho 'Cursor error' >&2\nexit 1\n",
+        );
 
         let config = CursorConfig {
             path: mock_path.to_str().unwrap().to_string(),
@@ -309,18 +289,7 @@ mod tests {
         let temp_dir = tempfile::tempdir().unwrap();
         let mock_path = temp_dir.path().join("mock-cursor-pwd");
 
-        {
-            use std::io::Write;
-            let mut file = std::fs::File::create(&mock_path).unwrap();
-            file.write_all(b"#!/bin/sh\npwd\n").unwrap();
-            file.sync_all().unwrap();
-        }
-
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            std::fs::set_permissions(&mock_path, std::fs::Permissions::from_mode(0o755)).unwrap();
-        }
+        crate::agent::create_mock_executable(&mock_path, b"#!/bin/sh\npwd\n");
 
         let config = CursorConfig {
             path: mock_path.to_str().unwrap().to_string(),
