@@ -14,7 +14,7 @@ use crate::agent::{AgentProvider, ClaudeProvider, CursorProvider, Provider};
 use crate::config::Config;
 use crate::detection::CompletionDetector;
 use crate::notifications::{NotificationDetails, NotificationEvent, Notifier};
-use crate::sandbox::SandboxRunner;
+use crate::sandbox::{SandboxError, SandboxRunner};
 use crate::state::{Mode, RalphState};
 
 // -----------------------------------------------------------------------------
@@ -209,7 +209,11 @@ pub(crate) async fn run(
                 let error_msg = e.to_string();
 
                 // Check if this is a recoverable error (timeout, rate limit, etc.)
-                let is_timeout = error_msg.contains("timed out");
+                // Use typed error checking for sandbox errors
+                let is_timeout = e
+                    .downcast_ref::<SandboxError>()
+                    .is_some_and(SandboxError::is_timeout)
+                    || error_msg.contains("timed out"); // Fallback for non-sandbox timeouts
                 let is_rate_limit = error_msg.contains("resource_exhausted")
                     || error_msg.contains("rate limit")
                     || error_msg.contains("Rate limit")

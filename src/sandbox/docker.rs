@@ -13,7 +13,23 @@ use tracing::{debug, info, warn};
 
 use crate::agent::Provider;
 use crate::config::{AgentConfig, Config};
+use crate::sandbox::error::SandboxError;
 use crate::sandbox::network::validate_domain;
+
+/// Connects to the Docker daemon and verifies it's accessible.
+///
+/// Returns `SandboxError::DockerUnavailable` if Docker is not running.
+async fn connect_docker() -> Result<Docker> {
+    let docker = Docker::connect_with_local_defaults()
+        .map_err(|e| SandboxError::docker_unavailable(format!("Failed to connect: {e}")))?;
+
+    docker
+        .ping()
+        .await
+        .map_err(|e| SandboxError::docker_unavailable(format!("Failed to ping daemon: {e}")))?;
+
+    Ok(docker)
+}
 
 /// Runs agents inside a Docker container for isolation.
 pub(crate) struct SandboxRunner {
@@ -37,14 +53,7 @@ impl SandboxRunner {
     /// left behind from previous runs (e.g., after crashes).
     #[allow(tail_expr_drop_order)] // Drop order doesn't matter for async operations
     pub(crate) async fn cleanup_orphaned_containers() -> Result<u32> {
-        let docker = Docker::connect_with_local_defaults()
-            .context("Failed to connect to Docker. Is Docker running?")?;
-
-        // Check if Docker is accessible
-        docker
-            .ping()
-            .await
-            .context("Cannot ping Docker daemon. Is Docker running?")?;
+        let docker = connect_docker().await?;
 
         // List all containers (including stopped ones)
         let containers = docker
@@ -118,14 +127,7 @@ impl SandboxRunner {
             self.provider
         );
 
-        let docker = Docker::connect_with_local_defaults()
-            .context("Failed to connect to Docker. Is Docker running?")?;
-
-        // Check if Docker is accessible
-        docker
-            .ping()
-            .await
-            .context("Cannot ping Docker daemon. Is Docker running?")?;
+        let docker = connect_docker().await?;
 
         let container_name = format!(
             "ralph-{}",
@@ -146,28 +148,30 @@ impl SandboxRunner {
                 container_config,
             )
             .await
-            .context("Failed to create container")?;
+            .map_err(|e| {
+                let msg = e.to_string();
+                if msg.contains("No such image") || msg.contains("not found") {
+                    SandboxError::image_not_found(&self.config.sandbox.image)
+                } else {
+                    SandboxError::container_failed(format!("Failed to create container: {e}"))
+                }
+            })?;
 
         // Start container
         debug!("Starting persistent container");
         docker
             .start_container::<String>(&container_name, None)
             .await
-            .context("Failed to start container")?;
+            .map_err(|e| {
+                SandboxError::container_failed(format!("Failed to start container: {e}"))
+            })?;
 
         Ok(container_name)
     }
 
     /// Removes a persistent container.
     pub(crate) async fn remove_persistent_container(container_name: &str) -> Result<()> {
-        let docker = Docker::connect_with_local_defaults()
-            .context("Failed to connect to Docker. Is Docker running?")?;
-
-        // Check if Docker is accessible
-        docker
-            .ping()
-            .await
-            .context("Cannot ping Docker daemon. Is Docker running?")?;
+        let docker = connect_docker().await?;
 
         debug!("Removing persistent container: {}", container_name);
         let _ = docker
@@ -190,10 +194,18 @@ impl SandboxRunner {
         let info = docker
             .inspect_container(container_name, None::<InspectContainerOptions>)
             .await
-            .context("Failed to inspect container - it may have been removed")?;
+            .map_err(|e| {
+                SandboxError::container_unhealthy(format!(
+                    "Failed to inspect container - it may have been removed: {e}"
+                ))
+            })?;
 
-        let state = info.state.context("Container has no state")?;
-        let status = state.status.context("Container state has no status")?;
+        let state = info
+            .state
+            .ok_or_else(|| SandboxError::container_unhealthy("Container has no state"))?;
+        let status = state
+            .status
+            .ok_or_else(|| SandboxError::container_unhealthy("Container state has no status"))?;
 
         match status {
             ContainerStateStatusEnum::RUNNING => {
@@ -209,15 +221,20 @@ impl SandboxRunner {
                 docker
                     .start_container::<String>(container_name, None)
                     .await
-                    .context("Failed to restart stopped container")?;
+                    .map_err(|e| {
+                        SandboxError::container_failed(format!(
+                            "Failed to restart stopped container: {e}"
+                        ))
+                    })?;
                 info!("Successfully restarted container {}", container_name);
                 Ok(())
             }
             ContainerStateStatusEnum::DEAD => {
                 // Dead container cannot be restarted - needs recreation
-                anyhow::bail!(
-                    "Container {container_name} is dead and cannot be restarted. Please recreate it."
-                )
+                Err(SandboxError::container_unhealthy(format!(
+                    "Container {container_name} is dead and cannot be restarted"
+                ))
+                .into())
             }
             ContainerStateStatusEnum::PAUSED => {
                 // Unpause the container
@@ -225,7 +242,9 @@ impl SandboxRunner {
                 docker
                     .unpause_container(container_name)
                     .await
-                    .context("Failed to unpause container")?;
+                    .map_err(|e| {
+                        SandboxError::container_failed(format!("Failed to unpause container: {e}"))
+                    })?;
                 info!("Successfully unpaused container {}", container_name);
                 Ok(())
             }
@@ -242,14 +261,19 @@ impl SandboxRunner {
                         return Ok(());
                     }
                 }
-                anyhow::bail!("Container {container_name} failed to restart")
+                Err(SandboxError::container_unhealthy(format!(
+                    "Container {container_name} failed to restart"
+                ))
+                .into())
             }
-            ContainerStateStatusEnum::REMOVING => {
-                anyhow::bail!("Container {container_name} is being removed. Please recreate it.")
-            }
-            ContainerStateStatusEnum::EMPTY => {
-                anyhow::bail!("Container {container_name} has unknown state. Please recreate it.")
-            }
+            ContainerStateStatusEnum::REMOVING => Err(SandboxError::container_unhealthy(format!(
+                "Container {container_name} is being removed"
+            ))
+            .into()),
+            ContainerStateStatusEnum::EMPTY => Err(SandboxError::container_unhealthy(format!(
+                "Container {container_name} has unknown state"
+            ))
+            .into()),
         }
     }
 
@@ -263,14 +287,7 @@ impl SandboxRunner {
     ) -> Result<String> {
         info!("Running {} in Docker sandbox", self.provider);
 
-        let docker = Docker::connect_with_local_defaults()
-            .context("Failed to connect to Docker. Is Docker running?")?;
-
-        // Check if Docker is accessible
-        docker
-            .ping()
-            .await
-            .context("Cannot ping Docker daemon. Is Docker running?")?;
+        let docker = connect_docker().await?;
 
         let container_name = if let Some(name) = reuse_container_name {
             // Check container health before reusing
@@ -298,14 +315,23 @@ impl SandboxRunner {
                     container_config,
                 )
                 .await
-                .context("Failed to create container")?;
+                .map_err(|e| {
+                    let msg = e.to_string();
+                    if msg.contains("No such image") || msg.contains("not found") {
+                        SandboxError::image_not_found(&self.config.sandbox.image)
+                    } else {
+                        SandboxError::container_failed(format!("Failed to create container: {e}"))
+                    }
+                })?;
 
             // Start container
             debug!("Starting container");
             docker
                 .start_container::<String>(&name, None)
                 .await
-                .context("Failed to start container")?;
+                .map_err(|e| {
+                    SandboxError::container_failed(format!("Failed to start container: {e}"))
+                })?;
 
             name
         };
@@ -446,7 +472,7 @@ impl SandboxRunner {
                 },
             )
             .await
-            .context("Failed to create exec")?;
+            .map_err(|e| SandboxError::container_failed(format!("Failed to create exec: {e}")))?;
 
         // Get timeout from config (convert minutes to Duration)
         let timeout_duration = std::time::Duration::from_secs(
@@ -456,7 +482,7 @@ impl SandboxRunner {
         match docker
             .start_exec(&exec.id, None)
             .await
-            .context("Failed to start exec")?
+            .map_err(|e| SandboxError::container_failed(format!("Failed to start exec: {e}")))?
         {
             StartExecResults::Attached {
                 output: mut stream, ..
@@ -498,10 +524,7 @@ impl SandboxRunner {
                         let _ = docker
                             .kill_container(container_name, None::<KillContainerOptions<String>>)
                             .await;
-                        anyhow::bail!(
-                            "Container execution timed out after {} minutes",
-                            self.config.sandbox.resources.timeout_minutes
-                        )
+                        Err(SandboxError::timeout(timeout_duration).into())
                     }
                 }
             }
@@ -539,15 +562,17 @@ impl SandboxRunner {
                 },
             )
             .await
-            .context("Failed to create exec for iptables setup")?;
+            .map_err(|e| {
+                SandboxError::network_setup_failed(format!(
+                    "Failed to create exec for iptables setup: {e}"
+                ))
+            })?;
 
         if let StartExecResults::Attached {
             output: mut stream, ..
-        } = docker
-            .start_exec(&exec.id, None)
-            .await
-            .context("Failed to start iptables setup exec")?
-        {
+        } = docker.start_exec(&exec.id, None).await.map_err(|e| {
+            SandboxError::network_setup_failed(format!("Failed to start iptables setup exec: {e}"))
+        })? {
             let mut output = String::new();
             loop {
                 let chunk_result = stream.next().await;
