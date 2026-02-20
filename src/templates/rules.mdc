@@ -42,16 +42,6 @@ After implementing, run the validation commands from AGENTS.md:
 
 If any fail, fix them before committing.
 
-## Completion Promise
-
-If the loop was started with a completion promise, you may output it when (and ONLY when) the promise is genuinely true:
-
-```
-<promise>YOUR_PROMISE_HERE</promise>
-```
-
-NEVER output a false promise to exit the loop. The loop continues until genuine completion.
-
 ## Key Language Patterns
 
 Use these specific phrases for clarity:

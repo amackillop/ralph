@@ -1,7 +1,7 @@
 //! Ralph loop state management.
 //!
 //! Persists loop state to `.ralph/state.toml` including iteration count,
-//! mode, completion promise, and timing information.
+//! mode, and timing information.
 
 use anyhow::{Context, Result};
 use chrono::{DateTime, Utc};

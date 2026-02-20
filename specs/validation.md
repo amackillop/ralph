@@ -45,6 +45,12 @@ command = "nix flake check --quiet"  # Default for Nix projects
 # command = "./validate.sh"          # Custom script
 ```
 
+## Error Truncation
+
+- **Agent prompt**: Full error output (not truncated) for maximum context
+- **Notifications**: First 5 lines only (keeps notifications concise)
+- **Logs**: Full error output
+
 ## Acceptance Criteria
 
 1. Validation runs after every iteration

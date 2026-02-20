@@ -12,9 +12,10 @@ The sandbox is the security boundary — not the agent's permission system.
 ## Capabilities
 
 - Workspace mounted read-write at `/workspace`
-- SSH keys and gitconfig mounted read-only
+- Credential auto-mounting (SSH, gitconfig, npmrc, cargo, pypi)
+- Custom volume mounts
 - Resource limits (CPU, memory, timeout)
-- Network policy enforcement
+- Network policy enforcement (DNS configurable)
 - Container reuse between iterations (optional)
 
 ## Network Policies
@@ -26,6 +27,9 @@ policy = "allowlist"  # Only allowed domains
 policy = "deny"       # No network access
 
 allowed = ["github.com", "crates.io", "api.anthropic.com"]
+
+# Custom DNS servers (default: ["8.8.8.8", "1.1.1.1"])
+dns = ["8.8.8.8", "1.1.1.1"]
 ```
 
 Allowlist implemented via iptables rules within container.
@@ -43,8 +47,23 @@ Built via Nix for reproducibility:
 [sandbox]
 enabled = true
 image = "ralph:latest"
-reuse_container = true   # Faster iteration startup
+reuse_container = false  # Default: false. Set true for faster iteration startup
 use_local_image = true   # Skip pull if image exists locally
+
+# Custom volume mounts (workspace always mounted at /workspace)
+mounts = [
+    { host = "~/.npm", container = "/root/.npm", readonly = false }
+]
+
+# Credential auto-mounts (defaults shown, set to [] to disable)
+# Auto-mounted read-only if they exist on host
+credential_mounts = [
+    { host = "~/.ssh", container = "/root/.ssh", readonly = true },
+    { host = "~/.gitconfig", container = "/root/.gitconfig", readonly = true },
+    { host = "~/.npmrc", container = "/root/.npmrc", readonly = true },
+    { host = "~/.cargo/credentials.toml", container = "/root/.cargo/credentials.toml", readonly = true },
+    { host = "~/.pypirc", container = "/root/.pypirc", readonly = true },
+]
 
 [sandbox.resources]
 memory = "8g"

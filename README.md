@@ -20,11 +20,12 @@ ralph loop build --max-iterations 50
 
 Each iteration:
 1. Reads the prompt file (PROMPT_plan.md or PROMPT_build.md)
-2. Invokes Cursor with the prompt
+2. Invokes the agent with the prompt
 3. Waits for completion
-4. Checks for completion promise or max iterations
-5. Git commits and pushes changes
-6. Repeats with fresh context
+4. Runs validation (backpressure)
+5. Checks for idle detection or max iterations
+6. Git commits and pushes changes
+7. Repeats with fresh context
 
 ## Installation
 
@@ -92,7 +93,7 @@ ralph init
 ralph loop plan --max-iterations 5
 
 # Review the plan, then start building
-ralph loop build --max-iterations 50 --completion-promise "All tests passing"
+ralph loop build --max-iterations 50
 ```
 
 ## Commands
@@ -124,9 +125,6 @@ ralph loop plan --max-iterations 5
 # Building mode (implements from plan)
 ralph loop build --max-iterations 50
 
-# With completion promise
-ralph loop build --completion-promise "DONE"
-
 # Skip Docker sandbox (run directly on host)
 ralph loop build --no-sandbox
 
@@ -136,7 +134,6 @@ ralph loop build --prompt my-custom-prompt.md
 
 Options:
 - `--max-iterations <N>` - Stop after N iterations (default: unlimited)
-- `--completion-promise <TEXT>` - Stop when `<promise>TEXT</promise>` is detected
 - `--no-sandbox` - Run without Docker isolation
 - `--prompt <FILE>` - Use custom prompt file
 
@@ -221,7 +218,8 @@ auto_push = true
 protected_branches = ["main", "master", "production"]
 
 [completion]
-promise_format = "<promise>{}</promise>"
+# Stop after N consecutive idle iterations (validation passes, no new commits)
+idle_threshold = 2
 ```
 
 ### Code Validation
@@ -380,7 +378,7 @@ Review the plan before proceeding.
 ### Phase 3: Building
 
 ```bash
-ralph loop build --max-iterations 50 --completion-promise "All tests passing"
+ralph loop build --max-iterations 50
 ```
 
 Ralph will:
@@ -481,7 +479,7 @@ ralph loop build --no-sandbox
 
 ### Loop Running Forever
 
-Always set `--max-iterations` or `--completion-promise`:
+Always set `--max-iterations` or rely on idle detection (`idle_threshold` in config):
 
 ```bash
 # Safe defaults
