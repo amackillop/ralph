@@ -359,16 +359,14 @@ impl SandboxRunner {
             binds.push(format!("{}:{}:{}", host_path, mount.container, mode));
         }
 
-        // Add default credential mounts if they exist
-        if let Some(home) = dirs::home_dir() {
-            let ssh_dir = home.join(".ssh");
-            if ssh_dir.exists() {
-                binds.push(format!("{}:/root/.ssh:ro", ssh_dir.display()));
-            }
-
-            let gitconfig = home.join(".gitconfig");
-            if gitconfig.exists() {
-                binds.push(format!("{}:/root/.gitconfig:ro", gitconfig.display()));
+        // Add credential mounts if they exist on host
+        for mount in &sandbox.credential_mounts {
+            if let Ok(host_path) = expand_path(&mount.host) {
+                let path = Path::new(&host_path);
+                if path.exists() {
+                    let mode = if mount.readonly { "ro" } else { "rw" };
+                    binds.push(format!("{}:{}:{}", host_path, mount.container, mode));
+                }
             }
         }
 
