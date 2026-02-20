@@ -190,16 +190,14 @@ pub(crate) async fn run(
                 .run(&cwd, &prompt, persistent_container_name.as_deref())
                 .await
         } else {
-            // Non-sandbox mode: apply timeout from config
-            let timeout_duration = std::time::Duration::from_secs(
-                u64::from(config.sandbox.resources.timeout_minutes) * 60,
-            );
+            // Non-sandbox mode: apply timeout (provider-specific > global)
+            let timeout_mins = resolve_timeout(&config, provider);
+            let timeout_duration = std::time::Duration::from_secs(u64::from(timeout_mins) * 60);
             tokio::time::timeout(timeout_duration, agent.invoke(&cwd, &prompt))
                 .await
                 .unwrap_or_else(|_| {
                     Err(anyhow::anyhow!(
-                        "Agent execution timed out after {} minutes",
-                        config.sandbox.resources.timeout_minutes
+                        "Agent execution timed out after {timeout_mins} minutes"
                     ))
                 })
         };
@@ -680,6 +678,15 @@ fn is_max_iterations_reached(state: &RalphState) -> bool {
 fn resolve_provider(config: &Config, provider_override: Option<&str>) -> Result<Provider> {
     let env_provider = std::env::var("RALPH_PROVIDER").ok();
     resolve_provider_with_env(config, provider_override, env_provider.as_deref())
+}
+
+/// Resolves the timeout for the given provider.
+/// Priority: provider-specific timeout > global sandbox timeout.
+fn resolve_timeout(config: &Config, provider: Provider) -> u32 {
+    config
+        .agent
+        .get_provider_timeout(provider)
+        .unwrap_or(config.sandbox.resources.timeout_minutes)
 }
 
 /// Internal helper for provider resolution with explicit env var value.
@@ -1531,5 +1538,57 @@ mod tests {
         let result = validate_code(&cwd, "sh -c \"unclosed").await;
         assert!(result.is_err());
         assert!(result.unwrap_err().contains("parse"));
+    }
+
+    #[test]
+    fn test_resolve_timeout_uses_provider_specific() {
+        // Provider timeout should override global
+        let toml = r"
+[agent.cursor]
+timeout_minutes = 120
+
+[sandbox.resources]
+timeout_minutes = 60
+";
+        let config: Config = toml::from_str(toml).unwrap();
+        assert_eq!(resolve_timeout(&config, Provider::Cursor), 120);
+    }
+
+    #[test]
+    fn test_resolve_timeout_falls_back_to_global() {
+        // No provider timeout - should use global
+        let toml = r"
+[sandbox.resources]
+timeout_minutes = 45
+";
+        let config: Config = toml::from_str(toml).unwrap();
+        assert_eq!(resolve_timeout(&config, Provider::Cursor), 45);
+        assert_eq!(resolve_timeout(&config, Provider::Claude), 45);
+    }
+
+    #[test]
+    fn test_resolve_timeout_different_providers() {
+        // Different timeouts for different providers
+        let toml = r"
+[agent.cursor]
+timeout_minutes = 30
+
+[agent.claude]
+timeout_minutes = 180
+
+[sandbox.resources]
+timeout_minutes = 60
+";
+        let config: Config = toml::from_str(toml).unwrap();
+        assert_eq!(resolve_timeout(&config, Provider::Cursor), 30);
+        assert_eq!(resolve_timeout(&config, Provider::Claude), 180);
+    }
+
+    #[test]
+    fn test_resolve_timeout_default_config() {
+        // Default config should use sandbox.resources.timeout_minutes (60)
+        let config = Config::default();
+        assert_eq!(resolve_timeout(&config, Provider::Cursor), 60);
+        assert_eq!(resolve_timeout(&config, Provider::Claude), 60);
     }
 }
