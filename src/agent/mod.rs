@@ -59,6 +59,36 @@ impl std::str::FromStr for Provider {
     }
 }
 
+/// Creates a mock executable script for testing.
+/// Handles the "Text file busy" (ETXTBSY) race condition that can occur
+/// when creating and immediately executing scripts, especially in release mode.
+#[cfg(test)]
+pub(crate) fn create_mock_executable(path: &std::path::Path, script: &[u8]) {
+    use std::io::Write;
+
+    // Write script content
+    {
+        let mut file = std::fs::File::create(path).unwrap();
+        file.write_all(script).unwrap();
+        file.sync_all().unwrap();
+    } // file is dropped (closed) here
+
+    // Set executable permissions
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o755)).unwrap();
+    }
+
+    // Sync parent directory to ensure inode metadata is flushed.
+    // This prevents ETXTBSY errors when tests run in parallel under high load.
+    if let Some(parent) = path.parent() {
+        if let Ok(dir) = std::fs::File::open(parent) {
+            let _ = dir.sync_all();
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
