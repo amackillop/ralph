@@ -134,10 +134,7 @@ impl DockerSandbox {
 
         let docker = connect_docker().await?;
 
-        let container_name = format!(
-            "ralph-{}",
-            uuid::Uuid::new_v4().to_string().split('-').next().unwrap()
-        );
+        let container_name = format!("ralph-{}", &uuid::Uuid::new_v4().simple().to_string()[..8]);
 
         // Build container configuration
         let container_config = self.build_container_config(project_dir)?;
@@ -301,10 +298,7 @@ impl DockerSandbox {
             name.to_string()
         } else {
             // Create new container for this iteration
-            let name = format!(
-                "ralph-{}",
-                uuid::Uuid::new_v4().to_string().split('-').next().unwrap()
-            );
+            let name = format!("ralph-{}", &uuid::Uuid::new_v4().simple().to_string()[..8]);
 
             // Build container configuration
             let container_config = self.build_container_config(project_dir)?;
@@ -343,7 +337,12 @@ impl DockerSandbox {
 
         // Write prompt to temp file in project dir
         let prompt_file = project_dir.join(".ralph").join("prompt.tmp");
-        std::fs::create_dir_all(prompt_file.parent().unwrap())?;
+        let prompt_parent = prompt_file.parent().ok_or_else(|| {
+            SandboxError::container_failed(
+                "Invalid prompt file path: no parent directory".to_string(),
+            )
+        })?;
+        std::fs::create_dir_all(prompt_parent)?;
         std::fs::write(&prompt_file, prompt)?;
 
         // Execute agent inside container
@@ -873,7 +872,10 @@ impl Sandbox for DockerSandbox {
 fn expand_path(path: &str) -> Result<String> {
     if path.starts_with("~/") {
         let home = dirs::home_dir().context("Could not determine home directory")?;
-        Ok(path.replacen('~', home.to_str().unwrap(), 1))
+        let home_str = home
+            .to_str()
+            .ok_or_else(|| anyhow::anyhow!("Home directory path contains invalid UTF-8"))?;
+        Ok(path.replacen('~', home_str, 1))
     } else {
         Ok(path.to_string())
     }

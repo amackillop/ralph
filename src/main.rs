@@ -70,11 +70,16 @@ fn setup_logging(
         config::LogRotation::Hourly => Rotation::HOURLY,
         config::LogRotation::Never => Rotation::NEVER,
     };
-    let file_appender = RollingFileAppender::new(
-        rotation,
-        log_file.parent().unwrap(),
-        log_file.file_name().unwrap(),
-    );
+    let parent = log_file.parent().ok_or_else(|| {
+        anyhow::anyhow!(
+            "Log file path has no parent directory: {}",
+            log_file.display()
+        )
+    })?;
+    let file_name = log_file
+        .file_name()
+        .ok_or_else(|| anyhow::anyhow!("Log file path has no file name: {}", log_file.display()))?;
+    let file_appender = RollingFileAppender::new(rotation, parent, file_name);
     let (non_blocking, guard) = tracing_appender::non_blocking(file_appender);
 
     let file_layer = if monitoring.log_format == "json" {
