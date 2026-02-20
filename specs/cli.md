@@ -10,19 +10,20 @@ Initialize a project for Ralph:
 - Creates `ralph.toml` with defaults
 - Creates `PROMPT_plan.md` and `PROMPT_build.md` templates
 - Creates `AGENTS.md` template
-- Creates `specs/` directory
+- Prints instructions to create `specs/` directory
 
 ### `ralph loop <mode>`
 
 Run the main Ralph loop:
 
 ```bash
-ralph loop plan              # Planning mode
-ralph loop build             # Build mode (default)
-ralph loop build --max 20    # Limit iterations
-ralph loop build --promise "ALL TESTS PASS"  # Stop on promise
+ralph loop plan                              # Planning mode
+ralph loop build                             # Build mode (default)
+ralph loop build -m 20                       # Limit iterations (--max-iterations)
+ralph loop build -c "ALL TESTS PASS"         # Stop on promise (--completion-promise)
 ralph loop build --provider claude           # Override provider
 ralph loop build --no-sandbox                # Disable sandbox
+ralph loop build --unlimited                 # No iteration limit
 ```
 
 ### `ralph status`
