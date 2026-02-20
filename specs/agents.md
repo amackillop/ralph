@@ -14,9 +14,12 @@ provider = "cursor"
 path = "agent"           # "cursor-agent" on NixOS
 output_format = "text"
 sandbox = "disabled"     # Required for shell access
+timeout_minutes = 60     # Optional: override sandbox timeout for Cursor
 ```
 
-Invocation: `agent -p --sandbox disabled --output-format text < prompt`
+Invocation: `agent -p "prompt" --sandbox disabled --output-format text`
+
+Note: Cursor CLI takes prompt as `-p` argument.
 
 ### Claude Code CLI
 
@@ -28,16 +31,21 @@ provider = "claude"
 path = "claude"
 model = "opus"           # Recommended for primary agent
 skip_permissions = true  # Required for autonomous operation
-output_format = "stream-json"
+output_format = "text"
+timeout_minutes = 120    # Optional: override sandbox timeout for Claude
+verbose = false          # Optional: enable verbose output
 ```
 
 Invocation: `claude -p --dangerously-skip-permissions --model opus < prompt`
 
+Note: Claude CLI takes prompt via stdin, `-p` enables print mode.
+
 ## Provider Selection
 
-1. Config file (`ralph.toml`) sets default
-2. CLI flag (`--provider`) overrides config
-3. Environment variable (future): `RALPH_PROVIDER`
+Priority (highest to lowest):
+1. CLI flag (`--provider`)
+2. Environment variable `RALPH_PROVIDER`
+3. Config file (`ralph.toml`)
 
 ## Provider Trait
 
@@ -52,5 +60,5 @@ trait AgentProvider {
 
 1. Provider configurable via config and CLI flag
 2. Clear error messages when agent CLI not found
-3. Prompt passed via stdin, output captured from stdout
+3. Prompt delivered to agent (stdin for Claude, CLI arg for Cursor), output captured from stdout
 4. Non-zero exit codes reported as errors

@@ -66,6 +66,15 @@ impl AgentConfig {
     pub fn get_provider(&self) -> Result<Provider> {
         self.provider.parse()
     }
+
+    /// Get the timeout for a specific provider.
+    /// Returns `None` if no provider-specific timeout is configured.
+    pub fn get_provider_timeout(&self, provider: Provider) -> Option<u32> {
+        match provider {
+            Provider::Cursor => self.cursor.timeout_minutes,
+            Provider::Claude => self.claude.timeout_minutes,
+        }
+    }
 }
 
 fn default_provider() -> String {
@@ -98,6 +107,11 @@ pub(crate) struct CursorConfig {
     /// Default: `"disabled"` to allow validation commands. Leverage Docker sandbox for more restricted access.
     #[serde(default = "default_cursor_sandbox")]
     pub sandbox: String,
+
+    /// Timeout in minutes for cursor agent execution.
+    /// Overrides `sandbox.resources.timeout_minutes` when set.
+    #[serde(default)]
+    pub timeout_minutes: Option<u32>,
 }
 
 impl Default for CursorConfig {
@@ -107,6 +121,7 @@ impl Default for CursorConfig {
             model: None,
             output_format: default_output_format(),
             sandbox: default_cursor_sandbox(),
+            timeout_minutes: None,
         }
     }
 }
@@ -149,6 +164,12 @@ pub(crate) struct ClaudeConfig {
     /// Verbose output
     #[serde(default)]
     pub verbose: bool,
+
+    /// Timeout in minutes for claude agent execution.
+    /// Overrides `sandbox.resources.timeout_minutes` when set.
+    /// Claude Opus often needs longer timeouts than other providers.
+    #[serde(default)]
+    pub timeout_minutes: Option<u32>,
 }
 
 impl Default for ClaudeConfig {
@@ -159,6 +180,7 @@ impl Default for ClaudeConfig {
             skip_permissions: true,
             output_format: default_claude_output_format(),
             verbose: false,
+            timeout_minutes: None,
         }
     }
 }
@@ -203,6 +225,12 @@ pub(crate) struct SandboxConfig {
     #[serde(default)]
     pub mounts: Vec<Mount>,
 
+    /// Credential paths to auto-mount if they exist.
+    /// Provides access to package registries, git config, SSH keys, etc.
+    /// Set to empty list to disable auto-mounting.
+    #[serde(default = "default_credential_mounts")]
+    pub credential_mounts: Vec<Mount>,
+
     /// Network configuration
     #[serde(default)]
     pub network: NetworkConfig,
@@ -220,6 +248,7 @@ impl Default for SandboxConfig {
             reuse_container: false,
             use_local_image: true,
             mounts: Vec::new(),
+            credential_mounts: default_credential_mounts(),
             network: NetworkConfig::default(),
             resources: ResourceConfig::default(),
         }
@@ -227,7 +256,7 @@ impl Default for SandboxConfig {
 }
 
 /// Volume mount configuration for Docker containers.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub(crate) struct Mount {
     /// Host path to mount.
     pub host: String,
@@ -236,6 +265,38 @@ pub(crate) struct Mount {
     /// Whether the mount is read-only.
     #[serde(default = "default_true")]
     pub readonly: bool,
+}
+
+/// Default credential mounts: common paths that are auto-mounted if they exist.
+/// These provide access to package registries, git config, and SSH keys.
+fn default_credential_mounts() -> Vec<Mount> {
+    vec![
+        Mount {
+            host: "~/.ssh".to_string(),
+            container: "/root/.ssh".to_string(),
+            readonly: true,
+        },
+        Mount {
+            host: "~/.gitconfig".to_string(),
+            container: "/root/.gitconfig".to_string(),
+            readonly: true,
+        },
+        Mount {
+            host: "~/.npmrc".to_string(),
+            container: "/root/.npmrc".to_string(),
+            readonly: true,
+        },
+        Mount {
+            host: "~/.cargo/credentials.toml".to_string(),
+            container: "/root/.cargo/credentials.toml".to_string(),
+            readonly: true,
+        },
+        Mount {
+            host: "~/.pypirc".to_string(),
+            container: "/root/.pypirc".to_string(),
+            readonly: true,
+        },
+    ]
 }
 
 /// Network access policy for sandbox containers.
@@ -340,6 +401,19 @@ impl Default for CompletionConfig {
     }
 }
 
+/// Log rotation policy.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub(crate) enum LogRotation {
+    /// Rotate logs daily (default).
+    #[default]
+    Daily,
+    /// Rotate logs hourly.
+    Hourly,
+    /// Never rotate logs (unbounded growth).
+    Never,
+}
+
 /// Monitoring and logging configuration.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub(crate) struct MonitoringConfig {
@@ -351,9 +425,20 @@ pub(crate) struct MonitoringConfig {
     #[serde(default = "default_log_format")]
     pub log_format: String,
 
+    /// Log rotation policy: "daily", "hourly", or "never".
+    /// Default: "daily" to prevent unbounded log growth.
+    #[serde(default)]
+    pub log_rotation: LogRotation,
+
     /// Show progress during loop execution.
     #[serde(default = "default_true")]
     pub show_progress: bool,
+
+    /// Maximum consecutive errors before stopping the loop (circuit breaker).
+    /// Set to 0 to disable the limit and continue indefinitely.
+    /// Default: 5
+    #[serde(default = "default_max_consecutive_errors")]
+    pub max_consecutive_errors: u32,
 
     /// Notification configuration.
     #[serde(default)]
@@ -365,16 +450,26 @@ impl Default for MonitoringConfig {
         Self {
             log_file: default_log_file(),
             log_format: default_log_format(),
+            log_rotation: LogRotation::default(),
             show_progress: true,
+            max_consecutive_errors: default_max_consecutive_errors(),
             notifications: NotificationConfig::default(),
         }
     }
 }
 
 /// Notification configuration for loop completion and errors.
+///
+/// Both `on_complete` and `on_error` support the same notification types:
+/// - `"webhook:<url>"` - POST to webhook URL
+/// - `"desktop"` - Desktop notification (notify-send/osascript)
+/// - `"sound"` - Sound alert (system sound or bell)
+/// - `"none"` or omit - No notification
+///
+/// For backward compatibility, bare URLs (without `webhook:` prefix) are treated as webhooks.
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub(crate) struct NotificationConfig {
-    /// Webhook URL to POST to on completion (optional).
+    /// Notification method on completion: "webhook:<url>", "desktop", "sound", or "none".
     #[serde(default)]
     pub on_complete: Option<String>,
 
@@ -464,6 +559,10 @@ fn default_log_format() -> String {
     "json".to_string()
 }
 
+fn default_max_consecutive_errors() -> u32 {
+    5
+}
+
 impl Config {
     /// Load configuration from file, using defaults if not found
     pub fn load(project_dir: &Path) -> Result<Self> {
@@ -480,12 +579,6 @@ impl Config {
             .with_context(|| format!("Failed to parse config file: {}", config_path.display()))?;
 
         Ok(config)
-    }
-
-    /// Check if current branch is protected
-    #[allow(dead_code)]
-    pub fn is_protected_branch(&self, branch: &str) -> bool {
-        self.git.protected_branches.iter().any(|b| b == branch)
     }
 }
 
@@ -673,5 +766,177 @@ on_error = "sound"
             config.monitoring.notifications.on_error,
             Some("sound".to_string())
         );
+    }
+
+    #[test]
+    fn test_max_consecutive_errors_default() {
+        let config = Config::default();
+        assert_eq!(config.monitoring.max_consecutive_errors, 5);
+    }
+
+    #[test]
+    fn test_max_consecutive_errors_custom() {
+        let toml = r"
+[monitoring]
+max_consecutive_errors = 10
+";
+        let config: Config = toml::from_str(toml).unwrap();
+        assert_eq!(config.monitoring.max_consecutive_errors, 10);
+    }
+
+    #[test]
+    fn test_max_consecutive_errors_disabled() {
+        let toml = r"
+[monitoring]
+max_consecutive_errors = 0
+";
+        let config: Config = toml::from_str(toml).unwrap();
+        assert_eq!(config.monitoring.max_consecutive_errors, 0);
+    }
+
+    #[test]
+    fn test_log_rotation_default() {
+        let config = Config::default();
+        assert_eq!(config.monitoring.log_rotation, LogRotation::Daily);
+    }
+
+    #[test]
+    fn test_log_rotation_daily() {
+        let toml = r#"
+[monitoring]
+log_rotation = "daily"
+"#;
+        let config: Config = toml::from_str(toml).unwrap();
+        assert_eq!(config.monitoring.log_rotation, LogRotation::Daily);
+    }
+
+    #[test]
+    fn test_log_rotation_hourly() {
+        let toml = r#"
+[monitoring]
+log_rotation = "hourly"
+"#;
+        let config: Config = toml::from_str(toml).unwrap();
+        assert_eq!(config.monitoring.log_rotation, LogRotation::Hourly);
+    }
+
+    #[test]
+    fn test_log_rotation_never() {
+        let toml = r#"
+[monitoring]
+log_rotation = "never"
+"#;
+        let config: Config = toml::from_str(toml).unwrap();
+        assert_eq!(config.monitoring.log_rotation, LogRotation::Never);
+    }
+
+    #[test]
+    fn test_credential_mounts_default() {
+        let config = Config::default();
+        assert!(!config.sandbox.credential_mounts.is_empty());
+        // Check that common paths are in defaults
+        let hosts: Vec<_> = config
+            .sandbox
+            .credential_mounts
+            .iter()
+            .map(|m| m.host.as_str())
+            .collect();
+        assert!(hosts.contains(&"~/.ssh"));
+        assert!(hosts.contains(&"~/.gitconfig"));
+        assert!(hosts.contains(&"~/.npmrc"));
+        assert!(hosts.contains(&"~/.cargo/credentials.toml"));
+    }
+
+    #[test]
+    fn test_credential_mounts_custom() {
+        let toml = r#"
+[sandbox]
+credential_mounts = [
+    { host = "~/.aws/credentials", container = "/root/.aws/credentials", readonly = true }
+]
+"#;
+        let config: Config = toml::from_str(toml).unwrap();
+        assert_eq!(config.sandbox.credential_mounts.len(), 1);
+        assert_eq!(
+            config.sandbox.credential_mounts[0].host,
+            "~/.aws/credentials"
+        );
+    }
+
+    #[test]
+    fn test_credential_mounts_disabled() {
+        let toml = r"
+[sandbox]
+credential_mounts = []
+";
+        let config: Config = toml::from_str(toml).unwrap();
+        assert!(config.sandbox.credential_mounts.is_empty());
+    }
+
+    #[test]
+    fn test_cursor_timeout_default() {
+        let config = Config::default();
+        assert_eq!(config.agent.cursor.timeout_minutes, None);
+    }
+
+    #[test]
+    fn test_cursor_timeout_custom() {
+        let toml = r"
+[agent.cursor]
+timeout_minutes = 120
+";
+        let config: Config = toml::from_str(toml).unwrap();
+        assert_eq!(config.agent.cursor.timeout_minutes, Some(120));
+    }
+
+    #[test]
+    fn test_claude_timeout_default() {
+        let config = Config::default();
+        assert_eq!(config.agent.claude.timeout_minutes, None);
+    }
+
+    #[test]
+    fn test_claude_timeout_custom() {
+        let toml = r"
+[agent.claude]
+timeout_minutes = 90
+";
+        let config: Config = toml::from_str(toml).unwrap();
+        assert_eq!(config.agent.claude.timeout_minutes, Some(90));
+    }
+
+    #[test]
+    fn test_get_provider_timeout_cursor() {
+        let toml = r"
+[agent.cursor]
+timeout_minutes = 45
+";
+        let config: Config = toml::from_str(toml).unwrap();
+        assert_eq!(
+            config.agent.get_provider_timeout(Provider::Cursor),
+            Some(45)
+        );
+        assert_eq!(config.agent.get_provider_timeout(Provider::Claude), None);
+    }
+
+    #[test]
+    fn test_get_provider_timeout_claude() {
+        let toml = r"
+[agent.claude]
+timeout_minutes = 180
+";
+        let config: Config = toml::from_str(toml).unwrap();
+        assert_eq!(
+            config.agent.get_provider_timeout(Provider::Claude),
+            Some(180)
+        );
+        assert_eq!(config.agent.get_provider_timeout(Provider::Cursor), None);
+    }
+
+    #[test]
+    fn test_get_provider_timeout_none() {
+        let config = Config::default();
+        assert_eq!(config.agent.get_provider_timeout(Provider::Cursor), None);
+        assert_eq!(config.agent.get_provider_timeout(Provider::Claude), None);
     }
 }

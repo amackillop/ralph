@@ -1,9 +1,11 @@
 use anyhow::{Context, Result};
+use async_trait::async_trait;
 use bollard::container::{
-    Config as ContainerConfig, CreateContainerOptions, KillContainerOptions, ListContainersOptions,
-    LogOutput, RemoveContainerOptions,
+    Config as ContainerConfig, CreateContainerOptions, InspectContainerOptions,
+    KillContainerOptions, ListContainersOptions, LogOutput, RemoveContainerOptions,
 };
 use bollard::exec::{CreateExecOptions, StartExecResults};
+use bollard::models::ContainerStateStatusEnum;
 use bollard::Docker;
 use futures_util::StreamExt;
 use std::fmt::Write;
@@ -12,15 +14,36 @@ use tracing::{debug, info, warn};
 
 use crate::agent::Provider;
 use crate::config::{AgentConfig, Config};
+use crate::sandbox::error::SandboxError;
+use crate::sandbox::network::validate_domain;
+use crate::sandbox::Sandbox;
 
-/// Runs agents inside a Docker container for isolation.
-pub(crate) struct SandboxRunner {
+/// Connects to the Docker daemon and verifies it's accessible.
+///
+/// Returns `SandboxError::DockerUnavailable` if Docker is not running.
+async fn connect_docker() -> Result<Docker> {
+    let docker = Docker::connect_with_local_defaults()
+        .map_err(|e| SandboxError::docker_unavailable(format!("Failed to connect: {e}")))?;
+
+    docker
+        .ping()
+        .await
+        .map_err(|e| SandboxError::docker_unavailable(format!("Failed to ping daemon: {e}")))?;
+
+    Ok(docker)
+}
+
+/// Docker-based sandbox implementation.
+///
+/// Runs agents inside Docker containers with configurable network policies,
+/// resource limits, and volume mounts.
+pub(crate) struct DockerSandbox {
     config: Config,
     provider: Provider,
     agent_config: AgentConfig,
 }
 
-impl SandboxRunner {
+impl DockerSandbox {
     /// Creates a new sandbox runner with the given configuration and provider.
     pub(crate) fn new(config: Config, provider: Provider, agent_config: AgentConfig) -> Self {
         Self {
@@ -35,14 +58,7 @@ impl SandboxRunner {
     /// left behind from previous runs (e.g., after crashes).
     #[allow(tail_expr_drop_order)] // Drop order doesn't matter for async operations
     pub(crate) async fn cleanup_orphaned_containers() -> Result<u32> {
-        let docker = Docker::connect_with_local_defaults()
-            .context("Failed to connect to Docker. Is Docker running?")?;
-
-        // Check if Docker is accessible
-        docker
-            .ping()
-            .await
-            .context("Cannot ping Docker daemon. Is Docker running?")?;
+        let docker = connect_docker().await?;
 
         // List all containers (including stopped ones)
         let containers = docker
@@ -116,14 +132,7 @@ impl SandboxRunner {
             self.provider
         );
 
-        let docker = Docker::connect_with_local_defaults()
-            .context("Failed to connect to Docker. Is Docker running?")?;
-
-        // Check if Docker is accessible
-        docker
-            .ping()
-            .await
-            .context("Cannot ping Docker daemon. Is Docker running?")?;
+        let docker = connect_docker().await?;
 
         let container_name = format!(
             "ralph-{}",
@@ -144,28 +153,30 @@ impl SandboxRunner {
                 container_config,
             )
             .await
-            .context("Failed to create container")?;
+            .map_err(|e| {
+                let msg = e.to_string();
+                if msg.contains("No such image") || msg.contains("not found") {
+                    SandboxError::image_not_found(&self.config.sandbox.image)
+                } else {
+                    SandboxError::container_failed(format!("Failed to create container: {e}"))
+                }
+            })?;
 
         // Start container
         debug!("Starting persistent container");
         docker
             .start_container::<String>(&container_name, None)
             .await
-            .context("Failed to start container")?;
+            .map_err(|e| {
+                SandboxError::container_failed(format!("Failed to start container: {e}"))
+            })?;
 
         Ok(container_name)
     }
 
     /// Removes a persistent container.
     pub(crate) async fn remove_persistent_container(container_name: &str) -> Result<()> {
-        let docker = Docker::connect_with_local_defaults()
-            .context("Failed to connect to Docker. Is Docker running?")?;
-
-        // Check if Docker is accessible
-        docker
-            .ping()
-            .await
-            .context("Cannot ping Docker daemon. Is Docker running?")?;
+        let docker = connect_docker().await?;
 
         debug!("Removing persistent container: {}", container_name);
         let _ = docker
@@ -181,9 +192,99 @@ impl SandboxRunner {
         Ok(())
     }
 
+    /// Checks if a container is healthy and ready for use.
+    /// Returns Ok(()) if container is running or was successfully restarted.
+    /// Returns Err if container is dead/corrupted and needs recreation.
+    async fn check_container_health(docker: &Docker, container_name: &str) -> Result<()> {
+        let info = docker
+            .inspect_container(container_name, None::<InspectContainerOptions>)
+            .await
+            .map_err(|e| {
+                SandboxError::container_unhealthy(format!(
+                    "Failed to inspect container - it may have been removed: {e}"
+                ))
+            })?;
+
+        let state = info
+            .state
+            .ok_or_else(|| SandboxError::container_unhealthy("Container has no state"))?;
+        let status = state
+            .status
+            .ok_or_else(|| SandboxError::container_unhealthy("Container state has no status"))?;
+
+        match status {
+            ContainerStateStatusEnum::RUNNING => {
+                debug!("Container {} is running", container_name);
+                Ok(())
+            }
+            ContainerStateStatusEnum::EXITED | ContainerStateStatusEnum::CREATED => {
+                // Container stopped - try to restart it
+                info!(
+                    "Container {} is not running ({}), attempting restart",
+                    container_name, status
+                );
+                docker
+                    .start_container::<String>(container_name, None)
+                    .await
+                    .map_err(|e| {
+                        SandboxError::container_failed(format!(
+                            "Failed to restart stopped container: {e}"
+                        ))
+                    })?;
+                info!("Successfully restarted container {}", container_name);
+                Ok(())
+            }
+            ContainerStateStatusEnum::DEAD => {
+                // Dead container cannot be restarted - needs recreation
+                Err(SandboxError::container_unhealthy(format!(
+                    "Container {container_name} is dead and cannot be restarted"
+                ))
+                .into())
+            }
+            ContainerStateStatusEnum::PAUSED => {
+                // Unpause the container
+                info!("Container {} is paused, attempting unpause", container_name);
+                docker
+                    .unpause_container(container_name)
+                    .await
+                    .map_err(|e| {
+                        SandboxError::container_failed(format!("Failed to unpause container: {e}"))
+                    })?;
+                info!("Successfully unpaused container {}", container_name);
+                Ok(())
+            }
+            ContainerStateStatusEnum::RESTARTING => {
+                // Already restarting - wait briefly and check again
+                debug!("Container {} is restarting, waiting...", container_name);
+                tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+                // Recursive check with depth limit would be better, but for now just verify running
+                let info2 = docker
+                    .inspect_container(container_name, None::<InspectContainerOptions>)
+                    .await?;
+                if let Some(state2) = info2.state {
+                    if state2.running.unwrap_or(false) {
+                        return Ok(());
+                    }
+                }
+                Err(SandboxError::container_unhealthy(format!(
+                    "Container {container_name} failed to restart"
+                ))
+                .into())
+            }
+            ContainerStateStatusEnum::REMOVING => Err(SandboxError::container_unhealthy(format!(
+                "Container {container_name} is being removed"
+            ))
+            .into()),
+            ContainerStateStatusEnum::EMPTY => Err(SandboxError::container_unhealthy(format!(
+                "Container {container_name} has unknown state"
+            ))
+            .into()),
+        }
+    }
+
     /// Runs the agent in a sandboxed container.
     /// If `reuse_container_name` is provided, uses that existing container instead of creating a new one.
-    pub(crate) async fn run(
+    async fn run_in_container(
         &self,
         project_dir: &Path,
         prompt: &str,
@@ -191,17 +292,11 @@ impl SandboxRunner {
     ) -> Result<String> {
         info!("Running {} in Docker sandbox", self.provider);
 
-        let docker = Docker::connect_with_local_defaults()
-            .context("Failed to connect to Docker. Is Docker running?")?;
-
-        // Check if Docker is accessible
-        docker
-            .ping()
-            .await
-            .context("Cannot ping Docker daemon. Is Docker running?")?;
+        let docker = connect_docker().await?;
 
         let container_name = if let Some(name) = reuse_container_name {
-            // Reuse existing container
+            // Check container health before reusing
+            Self::check_container_health(&docker, name).await?;
             debug!("Reusing container: {}", name);
             name.to_string()
         } else {
@@ -225,14 +320,23 @@ impl SandboxRunner {
                     container_config,
                 )
                 .await
-                .context("Failed to create container")?;
+                .map_err(|e| {
+                    let msg = e.to_string();
+                    if msg.contains("No such image") || msg.contains("not found") {
+                        SandboxError::image_not_found(&self.config.sandbox.image)
+                    } else {
+                        SandboxError::container_failed(format!("Failed to create container: {e}"))
+                    }
+                })?;
 
             // Start container
             debug!("Starting container");
             docker
                 .start_container::<String>(&name, None)
                 .await
-                .context("Failed to start container")?;
+                .map_err(|e| {
+                    SandboxError::container_failed(format!("Failed to start container: {e}"))
+                })?;
 
             name
         };
@@ -286,16 +390,14 @@ impl SandboxRunner {
             binds.push(format!("{}:{}:{}", host_path, mount.container, mode));
         }
 
-        // Add default credential mounts if they exist
-        if let Some(home) = dirs::home_dir() {
-            let ssh_dir = home.join(".ssh");
-            if ssh_dir.exists() {
-                binds.push(format!("{}:/root/.ssh:ro", ssh_dir.display()));
-            }
-
-            let gitconfig = home.join(".gitconfig");
-            if gitconfig.exists() {
-                binds.push(format!("{}:/root/.gitconfig:ro", gitconfig.display()));
+        // Add credential mounts if they exist on host
+        for mount in &sandbox.credential_mounts {
+            if let Ok(host_path) = expand_path(&mount.host) {
+                let path = Path::new(&host_path);
+                if path.exists() {
+                    let mode = if mount.readonly { "ro" } else { "rw" };
+                    binds.push(format!("{}:{}:{}", host_path, mount.container, mode));
+                }
             }
         }
 
@@ -375,7 +477,7 @@ impl SandboxRunner {
                 },
             )
             .await
-            .context("Failed to create exec")?;
+            .map_err(|e| SandboxError::container_failed(format!("Failed to create exec: {e}")))?;
 
         // Get timeout from config (convert minutes to Duration)
         let timeout_duration = std::time::Duration::from_secs(
@@ -385,7 +487,7 @@ impl SandboxRunner {
         match docker
             .start_exec(&exec.id, None)
             .await
-            .context("Failed to start exec")?
+            .map_err(|e| SandboxError::container_failed(format!("Failed to start exec: {e}")))?
         {
             StartExecResults::Attached {
                 output: mut stream, ..
@@ -427,10 +529,7 @@ impl SandboxRunner {
                         let _ = docker
                             .kill_container(container_name, None::<KillContainerOptions<String>>)
                             .await;
-                        anyhow::bail!(
-                            "Container execution timed out after {} minutes",
-                            self.config.sandbox.resources.timeout_minutes
-                        )
+                        Err(SandboxError::timeout(timeout_duration).into())
                     }
                 }
             }
@@ -468,15 +567,17 @@ impl SandboxRunner {
                 },
             )
             .await
-            .context("Failed to create exec for iptables setup")?;
+            .map_err(|e| {
+                SandboxError::network_setup_failed(format!(
+                    "Failed to create exec for iptables setup: {e}"
+                ))
+            })?;
 
         if let StartExecResults::Attached {
             output: mut stream, ..
-        } = docker
-            .start_exec(&exec.id, None)
-            .await
-            .context("Failed to start iptables setup exec")?
-        {
+        } = docker.start_exec(&exec.id, None).await.map_err(|e| {
+            SandboxError::network_setup_failed(format!("Failed to start iptables setup exec: {e}"))
+        })? {
             let mut output = String::new();
             loop {
                 let chunk_result = stream.next().await;
@@ -514,15 +615,44 @@ impl SandboxRunner {
     }
 }
 
-/// Builds the iptables setup script for allowlist network policy.
-/// The script will:
-/// 1. Flush existing OUTPUT chain rules
-/// 2. Allow loopback traffic
-/// 3. Allow DNS (port 53 UDP/TCP)
-/// 4. For each allowed domain, resolve to IPs and allow those IPs
-/// 5. Block all other outbound traffic
-fn build_iptables_script(allowed: &[String]) -> String {
-    let mut script = String::from("#!/bin/bash\nset -e\n\n");
+/// Bash helper function that routes IP addresses to iptables or ip6tables.
+/// Detects IPv6 by presence of colon, validates IPv4 format.
+const IPTABLES_ADD_IP_RULE_FN: &str = r#"# Helper function to add firewall rule for an IP address
+add_ip_rule() {
+  local ip="$1"
+  local domain="$2"
+  # Detect IPv6 by presence of colon
+  if [[ "$ip" == *:* ]]; then
+    # IPv6 address
+    if [ "$HAS_IP6TABLES" -eq 1 ]; then
+      if ip6tables -A OUTPUT -d "$ip" -j ACCEPT 2>/dev/null; then
+        echo "Allowed IPv6 $ip for $domain"
+      else
+        echo "Warning: Failed to add rule for IPv6 $ip" >&2
+      fi
+    else
+      echo "Warning: Skipping IPv6 $ip (ip6tables not available)" >&2
+    fi
+  else
+    # IPv4 address - validate format
+    if [[ $ip =~ ^[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}$ ]]; then
+      if iptables -A OUTPUT -d "$ip" -j ACCEPT 2>/dev/null; then
+        echo "Allowed IPv4 $ip for $domain"
+      else
+        echo "Warning: Failed to add rule for IPv4 $ip" >&2
+      fi
+    else
+      echo "Warning: Invalid IP format: $ip" >&2
+    fi
+  fi
+}
+
+"#;
+
+/// Writes the base firewall setup: availability checks, flush, default policy,
+/// loopback, DNS, and established connection rules for both IPv4 and IPv6.
+fn write_iptables_base_rules(script: &mut String) {
+    // Check iptables availability (required)
     script.push_str("# Check if iptables is available\n");
     script.push_str("if ! command -v iptables &> /dev/null; then\n");
     script.push_str(
@@ -530,47 +660,110 @@ fn build_iptables_script(allowed: &[String]) -> String {
     );
     script.push_str("  exit 1\n");
     script.push_str("fi\n\n");
-    script.push_str("# Flush OUTPUT chain\n");
+
+    // Check ip6tables availability (optional but recommended)
+    script.push_str("# Check if ip6tables is available for IPv6 support\n");
+    script.push_str("HAS_IP6TABLES=0\n");
+    script.push_str("if command -v ip6tables &> /dev/null; then\n");
+    script.push_str("  HAS_IP6TABLES=1\n");
+    script.push_str("else\n");
+    script.push_str(
+        "  echo 'Warning: ip6tables not found. IPv6 traffic will not be filtered.' >&2\n",
+    );
+    script.push_str("fi\n\n");
+
+    // Flush and set default policy - IPv4
+    script.push_str("# Flush OUTPUT chain and set default DROP policy (IPv4)\n");
     script.push_str("iptables -F OUTPUT\n");
     script.push_str("iptables -P OUTPUT DROP\n\n");
 
-    script.push_str("# Allow loopback\n");
-    script.push_str("iptables -A OUTPUT -o lo -j ACCEPT\n\n");
+    // Flush and set default policy - IPv6 (if available)
+    script.push_str("# Flush OUTPUT chain and set default DROP policy (IPv6)\n");
+    script.push_str("if [ \"$HAS_IP6TABLES\" -eq 1 ]; then\n");
+    script.push_str("  ip6tables -F OUTPUT\n");
+    script.push_str("  ip6tables -P OUTPUT DROP\n");
+    script.push_str("fi\n\n");
 
-    script.push_str("# Allow DNS (UDP and TCP)\n");
+    // Allow loopback - IPv4 and IPv6
+    script.push_str("# Allow loopback (IPv4 and IPv6)\n");
+    script.push_str("iptables -A OUTPUT -o lo -j ACCEPT\n");
+    script.push_str("if [ \"$HAS_IP6TABLES\" -eq 1 ]; then\n");
+    script.push_str("  ip6tables -A OUTPUT -o lo -j ACCEPT\n");
+    script.push_str("fi\n\n");
+
+    // Allow DNS - IPv4 and IPv6
+    script.push_str("# Allow DNS (UDP and TCP) - IPv4 and IPv6\n");
     script.push_str("iptables -A OUTPUT -p udp --dport 53 -j ACCEPT\n");
-    script.push_str("iptables -A OUTPUT -p tcp --dport 53 -j ACCEPT\n\n");
+    script.push_str("iptables -A OUTPUT -p tcp --dport 53 -j ACCEPT\n");
+    script.push_str("if [ \"$HAS_IP6TABLES\" -eq 1 ]; then\n");
+    script.push_str("  ip6tables -A OUTPUT -p udp --dport 53 -j ACCEPT\n");
+    script.push_str("  ip6tables -A OUTPUT -p tcp --dport 53 -j ACCEPT\n");
+    script.push_str("fi\n\n");
 
-    script.push_str("# Allow established connections\n");
-    script.push_str("iptables -A OUTPUT -m state --state ESTABLISHED,RELATED -j ACCEPT\n\n");
+    // Allow established connections - IPv4 and IPv6
+    script.push_str("# Allow established connections (IPv4 and IPv6)\n");
+    script.push_str("iptables -A OUTPUT -m state --state ESTABLISHED,RELATED -j ACCEPT\n");
+    script.push_str("if [ \"$HAS_IP6TABLES\" -eq 1 ]; then\n");
+    script.push_str("  ip6tables -A OUTPUT -m state --state ESTABLISHED,RELATED -j ACCEPT\n");
+    script.push_str("fi\n\n");
+
+    // Add the helper function
+    script.push_str(IPTABLES_ADD_IP_RULE_FN);
+}
+
+/// Builds the iptables setup script for allowlist network policy.
+/// The script will:
+/// 1. Flush existing OUTPUT chain rules (IPv4 and IPv6)
+/// 2. Allow loopback traffic
+/// 3. Allow DNS (port 53 UDP/TCP)
+/// 4. For each allowed domain, resolve to IPs and allow those IPs
+/// 5. Block all other outbound traffic
+///
+/// IPv6 traffic is handled via ip6tables if available. If ip6tables
+/// is not present, IPv6 traffic will not be explicitly blocked but
+/// IPv6 addresses from DNS will be skipped with a warning.
+fn build_iptables_script(allowed: &[String]) -> String {
+    let mut script = String::from("#!/bin/bash\nset -e\n\n");
+
+    write_iptables_base_rules(&mut script);
 
     // For each allowed domain, resolve to IPs and allow them
     script.push_str("# Allow traffic to allowed domains\n");
     for domain in allowed {
+        // Validate domain to prevent shell injection
+        if validate_domain(domain).is_none() {
+            writeln!(
+                &mut script,
+                "# SKIPPED invalid domain: (redacted for security)"
+            )
+            .unwrap();
+            writeln!(
+                &mut script,
+                "echo 'Warning: Skipped invalid domain in allowlist' >&2"
+            )
+            .unwrap();
+            continue;
+        }
         writeln!(&mut script, "# Resolve {domain} and allow its IPs").unwrap();
-        // Try multiple DNS resolution methods
+        // Try multiple DNS resolution methods (getent ahosts returns both IPv4 and IPv6)
         writeln!(
             &mut script,
-            "ips=$(getent hosts {domain} 2>/dev/null | awk '{{print $1}}' || getent ahosts {domain} 2>/dev/null | awk '{{print $1}}' | sort -u || echo '')"
+            "ips=$(getent ahosts {domain} 2>/dev/null | awk '{{print $1}}' | sort -u || getent hosts {domain} 2>/dev/null | awk '{{print $1}}' || echo '')"
         )
         .unwrap();
         script.push_str("if [ -z \"$ips\" ]; then\n");
         // Fallback to nslookup if getent fails
         writeln!(
             &mut script,
-            "  ips=$(nslookup {domain} 2>/dev/null | grep -A 1 'Name:' | grep 'Address:' | awk '{{print $2}}' | grep -v '^$' || echo '')"
+            "  ips=$(nslookup {domain} 2>/dev/null | grep -E 'Address:' | tail -n +2 | awk '{{print $2}}' | grep -v '^$' || echo '')"
         )
         .unwrap();
         script.push_str("fi\n");
         script.push_str("if [ -n \"$ips\" ]; then\n");
         script.push_str("  for ip in $ips; do\n");
-        script.push_str("    # Skip empty lines and comments\n");
+        script.push_str("    # Skip empty lines\n");
         script.push_str("    [ -z \"$ip\" ] && continue\n");
-        script.push_str("    # Validate IP format (basic check)\n");
-        script.push_str("    if [[ $ip =~ ^[0-9]{1,3}\\.[0-9]{1,3}\\.[0-9]{1,3}\\.[0-9]{1,3}$ ]] || [[ $ip =~ ^[0-9a-fA-F:]+$ ]]; then\n");
-        script.push_str("      iptables -A OUTPUT -d \"$ip\" -j ACCEPT\n");
-        writeln!(&mut script, "      echo \"Allowed IP $ip for {domain}\"").unwrap();
-        script.push_str("    fi\n");
+        writeln!(&mut script, "    add_ip_rule \"$ip\" \"{domain}\"").unwrap();
         script.push_str("  done\n");
         writeln!(
             &mut script,
@@ -583,7 +776,7 @@ fn build_iptables_script(allowed: &[String]) -> String {
     script
 }
 
-impl SandboxRunner {
+impl DockerSandbox {
     /// Builds the agent command to execute in the container.
     fn build_agent_command(&self, prompt_file: &Path) -> Result<Vec<String>> {
         // Convert host prompt file path to container path
@@ -649,6 +842,30 @@ impl SandboxRunner {
                 Ok(vec!["sh".to_string(), "-c".to_string(), full_cmd])
             }
         }
+    }
+}
+
+#[async_trait]
+impl Sandbox for DockerSandbox {
+    async fn cleanup_orphaned(&self) -> Result<u32> {
+        Self::cleanup_orphaned_containers().await
+    }
+
+    async fn create_persistent(&self, project_dir: &Path) -> Result<String> {
+        self.create_persistent_container(project_dir).await
+    }
+
+    async fn remove_persistent(&self, id: &str) -> Result<()> {
+        Self::remove_persistent_container(id).await
+    }
+
+    async fn run(
+        &self,
+        project_dir: &Path,
+        prompt: &str,
+        reuse_id: Option<&str>,
+    ) -> Result<String> {
+        self.run_in_container(project_dir, prompt, reuse_id).await
     }
 }
 
@@ -735,18 +952,18 @@ mod tests {
     }
 
     #[test]
-    fn test_sandbox_runner_new() {
+    fn test_docker_sandbox_new() {
         let config = Config::default();
-        let runner = SandboxRunner::new(config.clone(), Provider::Cursor, config.agent.clone());
-        assert_eq!(runner.config.sandbox.enabled, config.sandbox.enabled);
-        assert_eq!(runner.provider, Provider::Cursor);
+        let sandbox = DockerSandbox::new(config.clone(), Provider::Cursor, config.agent.clone());
+        assert_eq!(sandbox.config.sandbox.enabled, config.sandbox.enabled);
+        assert_eq!(sandbox.provider, Provider::Cursor);
     }
 
     #[test]
-    fn test_sandbox_runner_new_claude() {
+    fn test_docker_sandbox_new_claude() {
         let config = Config::default();
-        let runner = SandboxRunner::new(config.clone(), Provider::Claude, config.agent.clone());
-        assert_eq!(runner.provider, Provider::Claude);
+        let sandbox = DockerSandbox::new(config.clone(), Provider::Claude, config.agent.clone());
+        assert_eq!(sandbox.provider, Provider::Claude);
     }
 
     #[test]
@@ -754,7 +971,7 @@ mod tests {
         use tempfile::tempdir;
 
         let config = Config::default();
-        let runner = SandboxRunner::new(config.clone(), Provider::Cursor, config.agent.clone());
+        let runner = DockerSandbox::new(config.clone(), Provider::Cursor, config.agent.clone());
 
         let temp_dir = tempdir().unwrap();
         let prompt_file = temp_dir.path().join("test-prompt.txt");
@@ -772,7 +989,7 @@ mod tests {
         use tempfile::tempdir;
 
         let config = Config::default();
-        let runner = SandboxRunner::new(config.clone(), Provider::Claude, config.agent.clone());
+        let runner = DockerSandbox::new(config.clone(), Provider::Claude, config.agent.clone());
 
         let temp_dir = tempdir().unwrap();
         let prompt_file = temp_dir.path().join("test-prompt.txt");
@@ -814,7 +1031,7 @@ mod tests {
     async fn test_cleanup_orphaned_containers() {
         // This test verifies the cleanup function can be called
         // It will skip if Docker is not available
-        let result = SandboxRunner::cleanup_orphaned_containers().await;
+        let result = DockerSandbox::cleanup_orphaned_containers().await;
 
         // Function should either succeed (returning count) or fail with Docker connection error
         match result {
@@ -843,7 +1060,7 @@ mod tests {
         config.sandbox.network.policy = NetworkPolicy::Allowlist;
         config.sandbox.network.allowed = vec!["github.com".to_string(), "crates.io".to_string()];
 
-        let runner = SandboxRunner::new(config.clone(), Provider::Cursor, config.agent.clone());
+        let runner = DockerSandbox::new(config.clone(), Provider::Cursor, config.agent.clone());
 
         // Build container config
         let temp_dir = tempfile::tempdir().unwrap();
@@ -866,7 +1083,7 @@ mod tests {
         config.sandbox.network.policy = NetworkPolicy::Allowlist;
         config.sandbox.network.allowed = Vec::new();
 
-        let runner = SandboxRunner::new(config.clone(), Provider::Cursor, config.agent.clone());
+        let runner = DockerSandbox::new(config.clone(), Provider::Cursor, config.agent.clone());
 
         // Build container config - should still add NET_ADMIN
         let temp_dir = tempfile::tempdir().unwrap();
@@ -885,7 +1102,7 @@ mod tests {
         // This test verifies the persistent container creation function can be called
         // It will skip if Docker is not available
         let config = Config::default();
-        let runner = SandboxRunner::new(config.clone(), Provider::Cursor, config.agent.clone());
+        let runner = DockerSandbox::new(config.clone(), Provider::Cursor, config.agent.clone());
 
         let temp_dir = tempfile::tempdir().unwrap();
         let result = runner.create_persistent_container(temp_dir.path()).await;
@@ -897,7 +1114,7 @@ mod tests {
                 assert!(container_name.starts_with("ralph-"));
 
                 // Clean up the container
-                let _ = SandboxRunner::remove_persistent_container(&container_name).await;
+                let _ = DockerSandbox::remove_persistent_container(&container_name).await;
             }
             Err(e) => {
                 // Docker not available or image not found - this is acceptable in test environments
@@ -919,7 +1136,7 @@ mod tests {
     async fn test_remove_persistent_container() {
         // This test verifies the container removal function can be called
         // It will skip if Docker is not available
-        let result = SandboxRunner::remove_persistent_container("nonexistent-container").await;
+        let result = DockerSandbox::remove_persistent_container("nonexistent-container").await;
 
         match result {
             Ok(()) => {
@@ -934,5 +1151,286 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[tokio::test]
+    async fn test_check_container_health_nonexistent() {
+        // Health check on non-existent container should fail gracefully
+        let Ok(docker) = Docker::connect_with_local_defaults() else {
+            return; // Docker not available, skip test
+        };
+
+        if docker.ping().await.is_err() {
+            return; // Docker not accessible, skip test
+        }
+
+        let result =
+            DockerSandbox::check_container_health(&docker, "nonexistent-container-xyz").await;
+
+        // Should fail with inspection error
+        assert!(result.is_err());
+        let error_msg = result.unwrap_err().to_string();
+        assert!(
+            error_msg.contains("inspect")
+                || error_msg.contains("removed")
+                || error_msg.contains("No such container"),
+            "Unexpected error: {error_msg}"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_check_container_health_running_container() {
+        // Integration test: create a container, verify health check passes
+        let config = Config::default();
+        let runner = DockerSandbox::new(config.clone(), Provider::Cursor, config.agent.clone());
+
+        let temp_dir = tempfile::tempdir().unwrap();
+
+        // Create a persistent container
+        let Ok(container_name) = runner.create_persistent_container(temp_dir.path()).await else {
+            return; // Docker or image not available, skip test
+        };
+
+        // Health check should pass for running container
+        let docker = Docker::connect_with_local_defaults().unwrap();
+        let result = DockerSandbox::check_container_health(&docker, &container_name).await;
+        assert!(result.is_ok(), "Health check failed: {result:?}");
+
+        // Clean up
+        let _ = DockerSandbox::remove_persistent_container(&container_name).await;
+    }
+
+    #[tokio::test]
+    async fn test_check_container_health_stopped_container() {
+        // Integration test: create a container, stop it, verify health check restarts it
+        let config = Config::default();
+        let runner = DockerSandbox::new(config.clone(), Provider::Cursor, config.agent.clone());
+
+        let temp_dir = tempfile::tempdir().unwrap();
+
+        // Create a persistent container
+        let Ok(container_name) = runner.create_persistent_container(temp_dir.path()).await else {
+            return; // Docker or image not available, skip test
+        };
+
+        let docker = Docker::connect_with_local_defaults().unwrap();
+
+        // Stop the container
+        let _ = docker.stop_container(&container_name, None).await;
+
+        // Health check should restart it
+        let result = DockerSandbox::check_container_health(&docker, &container_name).await;
+        assert!(result.is_ok(), "Health check failed to restart: {result:?}");
+
+        // Verify container is now running
+        let info = docker
+            .inspect_container(&container_name, None::<InspectContainerOptions>)
+            .await
+            .unwrap();
+        let running = info.state.and_then(|s| s.running).unwrap_or(false);
+        assert!(running, "Container should be running after health check");
+
+        // Clean up
+        let _ = DockerSandbox::remove_persistent_container(&container_name).await;
+    }
+
+    #[test]
+    fn test_build_iptables_script_rejects_shell_injection() {
+        // Valid domains should appear in script
+        let allowed = vec!["github.com".to_string(), "api.anthropic.com".to_string()];
+        let script = build_iptables_script(&allowed);
+        assert!(script.contains("github.com"));
+        assert!(script.contains("api.anthropic.com"));
+
+        // Malicious domains should be skipped entirely
+        let malicious = vec![
+            "github.com; rm -rf /".to_string(),
+            "$(whoami).evil.com".to_string(),
+            "`id`.evil.com".to_string(),
+            "valid.com".to_string(), // one valid to ensure script still works
+        ];
+        let script = build_iptables_script(&malicious);
+
+        // Malicious payloads must NOT appear in script
+        assert!(!script.contains("rm -rf"));
+        assert!(!script.contains("$(whoami)"));
+        assert!(!script.contains("`id`"));
+
+        // Valid domain should still be present
+        assert!(script.contains("valid.com"));
+
+        // Should have warning comments for skipped domains
+        assert!(script.contains("SKIPPED invalid domain"));
+    }
+
+    #[test]
+    fn test_build_iptables_script_structure() {
+        let allowed = vec!["example.com".to_string()];
+        let script = build_iptables_script(&allowed);
+
+        // Verify script structure
+        assert!(script.contains("#!/bin/bash"));
+        assert!(script.contains("set -e"));
+        assert!(script.contains("iptables -F OUTPUT"));
+        assert!(script.contains("iptables -P OUTPUT DROP"));
+        assert!(script.contains("-o lo -j ACCEPT")); // loopback
+        assert!(script.contains("--dport 53")); // DNS
+        assert!(script.contains("ESTABLISHED,RELATED")); // stateful
+    }
+
+    #[test]
+    fn test_build_iptables_script_ipv6_support() {
+        let allowed = vec!["github.com".to_string()];
+        let script = build_iptables_script(&allowed);
+
+        // Verify ip6tables availability check
+        assert!(script.contains("HAS_IP6TABLES="));
+        assert!(script.contains("command -v ip6tables"));
+
+        // Verify IPv6 rules mirror IPv4 rules
+        assert!(script.contains("ip6tables -F OUTPUT"));
+        assert!(script.contains("ip6tables -P OUTPUT DROP"));
+        assert!(script.contains("ip6tables -A OUTPUT -o lo -j ACCEPT"));
+        assert!(script.contains("ip6tables -A OUTPUT -p udp --dport 53"));
+        assert!(script.contains("ip6tables -A OUTPUT -p tcp --dport 53"));
+        assert!(
+            script.contains("ip6tables -A OUTPUT -m state --state ESTABLISHED,RELATED -j ACCEPT")
+        );
+
+        // Verify helper function for routing IPv4/IPv6
+        assert!(script.contains("add_ip_rule()"));
+        assert!(script.contains("ip6tables -A OUTPUT -d"));
+
+        // Verify conditional execution based on ip6tables availability
+        assert!(script.contains("if [ \"$HAS_IP6TABLES\" -eq 1 ]"));
+    }
+
+    #[test]
+    fn test_build_iptables_script_uses_getent_ahosts() {
+        // getent ahosts returns both IPv4 and IPv6 addresses
+        let allowed = vec!["example.com".to_string()];
+        let script = build_iptables_script(&allowed);
+
+        // Should prefer getent ahosts over getent hosts for dual-stack support
+        assert!(script.contains("getent ahosts"));
+    }
+
+    /// Helper to execute a command in a container and return exit code + output.
+    #[allow(tail_expr_drop_order)]
+    async fn exec_cmd_in_container(
+        docker: &Docker,
+        container_name: &str,
+        cmd: &str,
+    ) -> (i64, String) {
+        let exec = docker
+            .create_exec(
+                container_name,
+                CreateExecOptions {
+                    cmd: Some(vec!["sh".to_string(), "-c".to_string(), cmd.to_string()]),
+                    attach_stdout: Some(true),
+                    attach_stderr: Some(true),
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap();
+
+        let mut output = String::new();
+        if let StartExecResults::Attached {
+            output: mut stream, ..
+        } = docker.start_exec(&exec.id, None).await.unwrap()
+        {
+            while let Some(chunk) = stream.next().await {
+                if let Ok(LogOutput::StdOut { message }) = chunk {
+                    output.push_str(&String::from_utf8_lossy(&message));
+                } else if let Ok(LogOutput::StdErr { message }) = chunk {
+                    output.push_str(&String::from_utf8_lossy(&message));
+                }
+            }
+        }
+
+        let inspect = docker.inspect_exec(&exec.id).await.unwrap();
+        let exit_code = inspect.exit_code.unwrap_or(-1);
+
+        (exit_code, output)
+    }
+
+    /// Integration test that verifies iptables rules actually block traffic.
+    /// This test requires Docker and the ralph:latest image with curl and iptables.
+    #[tokio::test]
+    async fn test_iptables_actually_blocks_traffic() {
+        use crate::config::{Config, NetworkPolicy};
+
+        // Create config with allowlist policy allowing only one specific domain
+        let mut config = Config::default();
+        config.sandbox.network.policy = NetworkPolicy::Allowlist;
+        // Allow only cloudflare's DNS (1.1.1.1) - it's highly available and fast
+        config.sandbox.network.allowed = vec!["one.one.one.one".to_string()];
+
+        let runner = DockerSandbox::new(config.clone(), Provider::Cursor, config.agent.clone());
+
+        let temp_dir = tempfile::tempdir().unwrap();
+
+        // Create a persistent container with NET_ADMIN capability
+        let Ok(container_name) = runner.create_persistent_container(temp_dir.path()).await else {
+            // Docker or image not available, skip test
+            return;
+        };
+
+        let docker = Docker::connect_with_local_defaults().unwrap();
+
+        // Set up iptables rules
+        let setup_result = runner
+            .setup_allowlist_iptables(&docker, &container_name)
+            .await;
+
+        if setup_result.is_err() {
+            // Clean up and skip - iptables might not be available
+            let _ = DockerSandbox::remove_persistent_container(&container_name).await;
+            return;
+        }
+
+        // Test 1: Allowed domain should be reachable (one.one.one.one -> 1.1.1.1)
+        let (allowed_exit, allowed_output) = exec_cmd_in_container(
+            &docker,
+            &container_name,
+            "curl --connect-timeout 5 --max-time 10 -s -o /dev/null -w '%{http_code}' https://one.one.one.one/dns-query 2>&1 || echo 'CURL_FAILED'",
+        )
+        .await;
+
+        // Test 2: Blocked domain should NOT be reachable (example.com is not in allowlist)
+        let (blocked_exit, blocked_output) = exec_cmd_in_container(
+            &docker,
+            &container_name,
+            "curl --connect-timeout 5 --max-time 10 -s https://example.com 2>&1 || echo 'BLOCKED_AS_EXPECTED'",
+        )
+        .await;
+
+        // Clean up
+        let _ = DockerSandbox::remove_persistent_container(&container_name).await;
+
+        // Verify results
+        // Allowed domain: curl should succeed (exit 0) or at least connect
+        // We accept HTTP 200, 301, 302, 400, etc. - any response means connection worked
+        let allowed_connected = allowed_exit == 0
+            || allowed_output.contains("200")
+            || allowed_output.contains("301")
+            || allowed_output.contains("400");
+
+        // Blocked domain: curl should fail to connect (timeout or connection refused)
+        let blocked_failed = blocked_exit != 0
+            || blocked_output.contains("BLOCKED_AS_EXPECTED")
+            || blocked_output.contains("timed out")
+            || blocked_output.contains("Connection refused")
+            || blocked_output.contains("Network is unreachable");
+
+        assert!(
+            allowed_connected,
+            "Allowed domain should be reachable. Exit: {allowed_exit}, Output: {allowed_output}"
+        );
+        assert!(
+            blocked_failed,
+            "Blocked domain should NOT be reachable. Exit: {blocked_exit}, Output: {blocked_output}"
+        );
     }
 }

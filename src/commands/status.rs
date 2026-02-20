@@ -316,6 +316,7 @@ mod tests {
             started_at: Utc::now(),
             last_iteration_at: None,
             error_count: 0,
+            consecutive_errors: 0,
             last_error: None,
         };
 
@@ -458,6 +459,7 @@ mod tests {
             started_at: Utc::now() - Duration::minutes(30),
             last_iteration_at: Some(Utc::now() - Duration::minutes(2)),
             error_count: 0,
+            consecutive_errors: 0,
             last_error: None,
         };
 
@@ -480,6 +482,7 @@ mod tests {
             started_at: Utc::now() - Duration::hours(1),
             last_iteration_at: Some(Utc::now() - Duration::minutes(5)),
             error_count: 3,
+            consecutive_errors: 2,
             last_error: Some("Git push failed: connection timeout".to_string()),
         };
 

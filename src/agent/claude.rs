@@ -152,6 +152,7 @@ mod tests {
             skip_permissions: false,
             output_format: "json".to_string(),
             verbose: true,
+            timeout_minutes: Some(90),
         };
         let provider = ClaudeProvider::new(config.clone());
         assert_eq!(provider.config.path, "/custom/claude");
@@ -159,6 +160,7 @@ mod tests {
         assert!(!provider.config.skip_permissions);
         assert_eq!(provider.config.output_format, "json");
         assert!(provider.config.verbose);
+        assert_eq!(provider.config.timeout_minutes, Some(90));
     }
 
     #[test]
@@ -255,5 +257,81 @@ mod tests {
         assert!(result.is_err());
         let err = result.unwrap_err().to_string();
         assert!(err.contains("Failed to run Claude agent"));
+    }
+
+    #[tokio::test]
+    async fn test_invoke_with_mock_binary_success() {
+        // Create a mock binary that echoes stdin to stdout (simulates Claude behavior)
+        let temp_dir = tempfile::tempdir().unwrap();
+        let mock_path = temp_dir.path().join("mock-claude");
+
+        // Shell script: read stdin and echo it back
+        crate::agent::create_mock_executable(&mock_path, b"#!/bin/sh\ncat\n");
+
+        let config = ClaudeConfig {
+            path: mock_path.to_str().unwrap().to_string(),
+            ..Default::default()
+        };
+        let provider = ClaudeProvider::new(config);
+
+        let result = provider
+            .invoke(temp_dir.path(), "test prompt from stdin")
+            .await;
+
+        assert!(result.is_ok(), "Expected success, got: {result:?}");
+        assert_eq!(result.unwrap(), "test prompt from stdin");
+    }
+
+    #[tokio::test]
+    async fn test_invoke_with_mock_binary_failure() {
+        // Create a mock binary that fails with exit code 1
+        let temp_dir = tempfile::tempdir().unwrap();
+        let mock_path = temp_dir.path().join("mock-claude-fail");
+
+        crate::agent::create_mock_executable(
+            &mock_path,
+            b"#!/bin/sh\necho 'Error message' >&2\nexit 1\n",
+        );
+
+        let config = ClaudeConfig {
+            path: mock_path.to_str().unwrap().to_string(),
+            ..Default::default()
+        };
+        let provider = ClaudeProvider::new(config);
+
+        let result = provider.invoke(temp_dir.path(), "test").await;
+
+        assert!(result.is_err());
+        let err = result.unwrap_err().to_string();
+        assert!(err.contains("failed with exit code"));
+        assert!(err.contains("Error message"));
+    }
+
+    #[tokio::test]
+    async fn test_invoke_uses_correct_working_directory() {
+        // Mock binary that outputs the current working directory
+        let temp_dir = tempfile::tempdir().unwrap();
+        let mock_path = temp_dir.path().join("mock-claude-pwd");
+
+        crate::agent::create_mock_executable(&mock_path, b"#!/bin/sh\npwd\n");
+
+        let config = ClaudeConfig {
+            path: mock_path.to_str().unwrap().to_string(),
+            ..Default::default()
+        };
+        let provider = ClaudeProvider::new(config);
+
+        // Use a specific subdirectory as project dir
+        let project_dir = temp_dir.path().join("project");
+        std::fs::create_dir(&project_dir).unwrap();
+
+        let result = provider.invoke(&project_dir, "ignored").await;
+
+        assert!(result.is_ok());
+        let output = result.unwrap();
+        assert!(
+            output.trim().ends_with("project"),
+            "Expected working dir to be project, got: {output}"
+        );
     }
 }

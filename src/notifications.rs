@@ -3,7 +3,7 @@
 //! Supports webhook POST, desktop notifications, and sound alerts
 //! for loop completion and error events.
 
-use anyhow::{Context, Result};
+use anyhow::Result;
 use chrono::Utc;
 use serde_json::json;
 use std::process::Command;
@@ -48,34 +48,61 @@ impl Notifier {
 
     /// Send completion notification.
     async fn notify_complete(&self, details: &NotificationDetails) {
-        if let Some(ref webhook_url) = self.config.on_complete {
-            if let Err(e) = self.send_webhook(webhook_url, "complete", details).await {
-                warn!("Failed to send completion webhook: {}", e);
-            }
+        if let Some(ref value) = self.config.on_complete {
+            self.send_notification(value, "complete", "Ralph Loop Complete", details)
+                .await;
         }
     }
 
     /// Send error notification.
     async fn notify_error(&self, details: &NotificationDetails) {
-        if let Some(ref on_error) = self.config.on_error {
-            if on_error.starts_with("webhook:") {
-                let url = on_error.strip_prefix("webhook:").unwrap_or("");
-                if !url.is_empty() {
-                    if let Err(e) = self.send_webhook(url, "error", details).await {
-                        warn!("Failed to send error webhook: {}", e);
-                    }
+        if let Some(ref value) = self.config.on_error {
+            self.send_notification(value, "error", "Ralph Loop Error", details)
+                .await;
+        }
+    }
+
+    /// Parse notification value and send appropriate notification.
+    ///
+    /// Supports:
+    /// - `"webhook:<url>"` - POST to webhook
+    /// - `"desktop"` - Desktop notification
+    /// - `"sound"` - Sound alert
+    /// - Bare URL (backward compat) - Treated as webhook
+    async fn send_notification(
+        &self,
+        value: &str,
+        event_type: &str,
+        title: &str,
+        details: &NotificationDetails,
+    ) {
+        if value.starts_with("webhook:") {
+            let url = value.strip_prefix("webhook:").unwrap_or("");
+            if !url.is_empty() {
+                if let Err(e) = self.send_webhook(url, event_type, details).await {
+                    warn!("Failed to send {} webhook: {}", event_type, e);
                 }
-            } else if on_error == "desktop" {
-                if let Err(e) = send_desktop_notification("Ralph Loop Error", &details.message) {
-                    warn!("Failed to send desktop notification: {}", e);
-                }
-            } else if on_error == "sound" {
-                play_sound();
+            }
+        } else if value == "desktop" {
+            if let Err(e) = send_desktop_notification(title, &details.message) {
+                warn!("Failed to send desktop notification: {}", e);
+            }
+        } else if value == "sound" {
+            play_sound();
+        } else if value == "none" {
+            // Explicitly disabled
+        } else if value.starts_with("http://") || value.starts_with("https://") {
+            // Backward compatibility: bare URL treated as webhook
+            if let Err(e) = self.send_webhook(value, event_type, details).await {
+                warn!("Failed to send {} webhook: {}", event_type, e);
             }
         }
     }
 
-    /// Send webhook POST request.
+    /// Send webhook POST request with exponential backoff retry.
+    ///
+    /// Retries up to 3 times with delays of 1s, 2s, 4s on transient failures.
+    #[allow(tail_expr_drop_order)] // Drop order changes are harmless for HTTP responses
     async fn send_webhook(
         &self,
         url: &str,
@@ -93,21 +120,50 @@ impl Notifier {
         debug!("Sending webhook to {}: {:?}", url, payload);
 
         let client = reqwest::Client::new();
-        let response = client
-            .post(url)
-            .json(&payload)
-            .send()
-            .await
-            .context("Failed to send webhook request")?;
+        let max_attempts = 3;
+        let mut last_error = None;
 
-        if !response.status().is_success() {
-            let status = response.status();
-            let body = response.text().await.unwrap_or_default();
-            anyhow::bail!("Webhook returned error status {status}: {body}");
+        for attempt in 0..max_attempts {
+            if attempt > 0 {
+                let delay_secs = 1u64 << attempt; // 2, 4 seconds for attempts 1, 2
+                debug!(
+                    "Webhook retry attempt {} after {}s delay",
+                    attempt + 1,
+                    delay_secs
+                );
+                tokio::time::sleep(std::time::Duration::from_secs(delay_secs)).await;
+            }
+
+            match client.post(url).json(&payload).send().await {
+                Ok(response) => {
+                    if response.status().is_success() {
+                        debug!("Webhook sent successfully");
+                        return Ok(());
+                    }
+
+                    let status = response.status();
+                    let body = response.text().await.unwrap_or_default();
+
+                    // Retry on 5xx server errors and 429 rate limit
+                    if status.is_server_error() || status.as_u16() == 429 {
+                        last_error = Some(format!("Webhook returned {status}: {body}"));
+                        continue;
+                    }
+
+                    // Don't retry client errors (4xx except 429)
+                    anyhow::bail!("Webhook returned error status {status}: {body}");
+                }
+                Err(e) => {
+                    // Retry on network errors
+                    last_error = Some(e.to_string());
+                }
+            }
         }
 
-        debug!("Webhook sent successfully");
-        Ok(())
+        anyhow::bail!(
+            "Webhook failed after {max_attempts} attempts: {}",
+            last_error.unwrap_or_else(|| "unknown error".to_string())
+        )
     }
 }
 
@@ -380,6 +436,55 @@ mod tests {
         let notifier = Notifier::new(config);
         let details = NotificationDetails::error(Some(1), "err", None);
         notifier.notify(NotificationEvent::Error, &details).await;
+    }
+
+    #[tokio::test]
+    async fn test_notifier_notify_complete_desktop() {
+        // Desktop notification on complete - may fail but shouldn't panic
+        let config = NotificationConfig {
+            on_complete: Some("desktop".to_string()),
+            on_error: None,
+        };
+        let notifier = Notifier::new(config);
+        let details = NotificationDetails::complete(1, 1, "done");
+        notifier.notify(NotificationEvent::Complete, &details).await;
+    }
+
+    #[tokio::test]
+    async fn test_notifier_notify_complete_sound() {
+        // Sound notification on complete - fires and forgets
+        let config = NotificationConfig {
+            on_complete: Some("sound".to_string()),
+            on_error: None,
+        };
+        let notifier = Notifier::new(config);
+        let details = NotificationDetails::complete(1, 1, "done");
+        notifier.notify(NotificationEvent::Complete, &details).await;
+    }
+
+    #[tokio::test]
+    async fn test_notifier_notify_complete_webhook_prefixed() {
+        // webhook: prefix on complete
+        let config = NotificationConfig {
+            on_complete: Some("webhook:".to_string()),
+            on_error: None,
+        };
+        let notifier = Notifier::new(config);
+        let details = NotificationDetails::complete(1, 1, "done");
+        // Empty URL should be handled gracefully
+        notifier.notify(NotificationEvent::Complete, &details).await;
+    }
+
+    #[tokio::test]
+    async fn test_notifier_notify_complete_none() {
+        // Explicit "none" disables notification
+        let config = NotificationConfig {
+            on_complete: Some("none".to_string()),
+            on_error: None,
+        };
+        let notifier = Notifier::new(config);
+        let details = NotificationDetails::complete(1, 1, "done");
+        notifier.notify(NotificationEvent::Complete, &details).await;
     }
 
     #[test]

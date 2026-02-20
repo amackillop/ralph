@@ -41,9 +41,13 @@ pub(crate) struct RalphState {
     pub started_at: DateTime<Utc>,
     /// When the last iteration completed.
     pub last_iteration_at: Option<DateTime<Utc>>,
-    /// Total number of recoverable errors encountered.
+    /// Total number of recoverable errors encountered (cumulative, never resets).
     #[serde(default)]
     pub error_count: u32,
+    /// Consecutive errors without a successful iteration (resets on success).
+    /// Used for exponential backoff and circuit breaker logic.
+    #[serde(default)]
+    pub consecutive_errors: u32,
     /// Last error message encountered (if any).
     #[serde(default)]
     pub last_error: Option<String>,
@@ -60,6 +64,7 @@ impl Default for RalphState {
             started_at: Utc::now(),
             last_iteration_at: None,
             error_count: 0,
+            consecutive_errors: 0,
             last_error: None,
         }
     }
@@ -111,21 +116,6 @@ impl RalphState {
 
         Ok(())
     }
-
-    /// Delete state file
-    #[allow(dead_code)]
-    pub fn delete(project_dir: &Path) -> Result<bool> {
-        let state_path = project_dir.join(STATE_FILE);
-
-        if state_path.exists() {
-            fs::remove_file(&state_path).with_context(|| {
-                format!("Failed to delete state file: {}", state_path.display())
-            })?;
-            Ok(true)
-        } else {
-            Ok(false)
-        }
-    }
 }
 
 #[cfg(test)]
@@ -143,6 +133,7 @@ mod tests {
             started_at: Utc::now(),
             last_iteration_at: Some(Utc::now()),
             error_count: 0,
+            consecutive_errors: 0,
             last_error: None,
         }
     }
@@ -161,6 +152,7 @@ mod tests {
         assert_eq!(loaded.max_iterations, state.max_iterations);
         assert_eq!(loaded.completion_promise, state.completion_promise);
         assert_eq!(loaded.error_count, state.error_count);
+        assert_eq!(loaded.consecutive_errors, state.consecutive_errors);
         assert_eq!(loaded.last_error, state.last_error);
     }
 
@@ -208,27 +200,6 @@ mod tests {
     }
 
     #[test]
-    fn test_delete_existing() {
-        let dir = tempdir().unwrap();
-        let state = make_state(true, Mode::Build);
-        state.save(dir.path()).unwrap();
-
-        let deleted = RalphState::delete(dir.path()).unwrap();
-        assert!(deleted);
-
-        // Verify it's gone
-        let loaded = RalphState::load(dir.path()).unwrap();
-        assert!(loaded.is_none());
-    }
-
-    #[test]
-    fn test_delete_nonexistent() {
-        let dir = tempdir().unwrap();
-        let deleted = RalphState::delete(dir.path()).unwrap();
-        assert!(!deleted);
-    }
-
-    #[test]
     fn test_default_state() {
         let state = RalphState::default();
         assert!(!state.active);
@@ -238,6 +209,7 @@ mod tests {
         assert!(state.completion_promise.is_none());
         assert!(state.last_iteration_at.is_none());
         assert_eq!(state.error_count, 0);
+        assert_eq!(state.consecutive_errors, 0);
         assert!(state.last_error.is_none());
     }
 
@@ -282,6 +254,7 @@ mod tests {
             started_at: Utc::now(),
             last_iteration_at: Some(Utc::now()),
             error_count: 3,
+            consecutive_errors: 2,
             last_error: Some("Test error".to_string()),
         };
 
@@ -289,6 +262,7 @@ mod tests {
         let loaded = RalphState::load(dir.path()).unwrap().unwrap();
 
         assert_eq!(loaded.error_count, 3);
+        assert_eq!(loaded.consecutive_errors, 2);
         assert_eq!(loaded.last_error, Some("Test error".to_string()));
     }
 
@@ -307,6 +281,7 @@ last_iteration_at = "2024-01-01T12:05:00Z"
 
         let state: RalphState = toml::from_str(old_state_toml).unwrap();
         assert_eq!(state.error_count, 0); // Should default to 0
+        assert_eq!(state.consecutive_errors, 0); // Should default to 0
         assert!(state.last_error.is_none()); // Should default to None
     }
 }

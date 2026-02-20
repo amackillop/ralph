@@ -131,12 +131,14 @@ mod tests {
             model: Some("gpt-4".to_string()),
             sandbox: "on".to_string(),
             output_format: "json".to_string(),
+            timeout_minutes: Some(30),
         };
         let provider = CursorProvider::new(config.clone());
         assert_eq!(provider.config.path, "/custom/agent");
         assert_eq!(provider.config.model, Some("gpt-4".to_string()));
         assert_eq!(provider.config.sandbox, "on");
         assert_eq!(provider.config.output_format, "json");
+        assert_eq!(provider.config.timeout_minutes, Some(30));
     }
 
     #[test]
@@ -229,5 +231,83 @@ mod tests {
         assert!(result.is_err());
         let err = result.unwrap_err().to_string();
         assert!(err.contains("Failed to run Cursor agent"));
+    }
+
+    #[tokio::test]
+    async fn test_invoke_with_mock_binary_success() {
+        // Create a mock binary that echoes the prompt arg (second arg after -p)
+        let temp_dir = tempfile::tempdir().unwrap();
+        let mock_path = temp_dir.path().join("mock-cursor");
+
+        // Shell script: echo the second argument (the prompt after -p)
+        crate::agent::create_mock_executable(&mock_path, b"#!/bin/sh\necho \"$2\"\n");
+
+        let config = CursorConfig {
+            path: mock_path.to_str().unwrap().to_string(),
+            sandbox: String::new(), // Don't add --sandbox flag
+            ..Default::default()
+        };
+        let provider = CursorProvider::new(config);
+
+        let result = provider
+            .invoke(temp_dir.path(), "test prompt from args")
+            .await;
+
+        assert!(result.is_ok(), "Expected success, got: {result:?}");
+        // Note: echo adds a newline
+        assert_eq!(result.unwrap().trim(), "test prompt from args");
+    }
+
+    #[tokio::test]
+    async fn test_invoke_with_mock_binary_failure() {
+        // Create a mock binary that fails with exit code 1
+        let temp_dir = tempfile::tempdir().unwrap();
+        let mock_path = temp_dir.path().join("mock-cursor-fail");
+
+        crate::agent::create_mock_executable(
+            &mock_path,
+            b"#!/bin/sh\necho 'Cursor error' >&2\nexit 1\n",
+        );
+
+        let config = CursorConfig {
+            path: mock_path.to_str().unwrap().to_string(),
+            ..Default::default()
+        };
+        let provider = CursorProvider::new(config);
+
+        let result = provider.invoke(temp_dir.path(), "test").await;
+
+        assert!(result.is_err());
+        let err = result.unwrap_err().to_string();
+        assert!(err.contains("failed with exit code"));
+        assert!(err.contains("Cursor error"));
+    }
+
+    #[tokio::test]
+    async fn test_invoke_uses_correct_working_directory() {
+        // Mock binary that outputs the current working directory
+        let temp_dir = tempfile::tempdir().unwrap();
+        let mock_path = temp_dir.path().join("mock-cursor-pwd");
+
+        crate::agent::create_mock_executable(&mock_path, b"#!/bin/sh\npwd\n");
+
+        let config = CursorConfig {
+            path: mock_path.to_str().unwrap().to_string(),
+            ..Default::default()
+        };
+        let provider = CursorProvider::new(config);
+
+        // Use a specific subdirectory as project dir
+        let project_dir = temp_dir.path().join("workspace");
+        std::fs::create_dir(&project_dir).unwrap();
+
+        let result = provider.invoke(&project_dir, "ignored").await;
+
+        assert!(result.is_ok());
+        let output = result.unwrap();
+        assert!(
+            output.trim().ends_with("workspace"),
+            "Expected working dir to be workspace, got: {output}"
+        );
     }
 }
