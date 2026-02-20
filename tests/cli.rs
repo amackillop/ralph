@@ -355,7 +355,11 @@ fn test_loop_without_init() {
     let dir = TempDir::new().unwrap();
 
     // Don't init - create minimal config but no prompt file
-    fs::write(dir.path().join("ralph.toml"), "[agent]\nprovider = \"claude\"").unwrap();
+    fs::write(
+        dir.path().join("ralph.toml"),
+        "[agent]\nprovider = \"claude\"",
+    )
+    .unwrap();
 
     ralph_in(&dir)
         .args(["loop", "plan"])
@@ -413,10 +417,7 @@ fn test_verbose_flag_global() {
     let dir = TempDir::new().unwrap();
 
     // -v should work as a global flag
-    ralph_in(&dir)
-        .args(["-v", "init"])
-        .assert()
-        .success();
+    ralph_in(&dir).args(["-v", "init"]).assert().success();
 
     assert!(dir.path().join("ralph.toml").exists());
 }
