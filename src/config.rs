@@ -340,6 +340,19 @@ impl Default for CompletionConfig {
     }
 }
 
+/// Log rotation policy.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub(crate) enum LogRotation {
+    /// Rotate logs daily (default).
+    #[default]
+    Daily,
+    /// Rotate logs hourly.
+    Hourly,
+    /// Never rotate logs (unbounded growth).
+    Never,
+}
+
 /// Monitoring and logging configuration.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub(crate) struct MonitoringConfig {
@@ -350,6 +363,11 @@ pub(crate) struct MonitoringConfig {
     /// Log format: "json" or "text".
     #[serde(default = "default_log_format")]
     pub log_format: String,
+
+    /// Log rotation policy: "daily", "hourly", or "never".
+    /// Default: "daily" to prevent unbounded log growth.
+    #[serde(default)]
+    pub log_rotation: LogRotation,
 
     /// Show progress during loop execution.
     #[serde(default = "default_true")]
@@ -371,6 +389,7 @@ impl Default for MonitoringConfig {
         Self {
             log_file: default_log_file(),
             log_format: default_log_format(),
+            log_rotation: LogRotation::default(),
             show_progress: true,
             max_consecutive_errors: default_max_consecutive_errors(),
             notifications: NotificationConfig::default(),
@@ -710,5 +729,41 @@ max_consecutive_errors = 0
 ";
         let config: Config = toml::from_str(toml).unwrap();
         assert_eq!(config.monitoring.max_consecutive_errors, 0);
+    }
+
+    #[test]
+    fn test_log_rotation_default() {
+        let config = Config::default();
+        assert_eq!(config.monitoring.log_rotation, LogRotation::Daily);
+    }
+
+    #[test]
+    fn test_log_rotation_daily() {
+        let toml = r#"
+[monitoring]
+log_rotation = "daily"
+"#;
+        let config: Config = toml::from_str(toml).unwrap();
+        assert_eq!(config.monitoring.log_rotation, LogRotation::Daily);
+    }
+
+    #[test]
+    fn test_log_rotation_hourly() {
+        let toml = r#"
+[monitoring]
+log_rotation = "hourly"
+"#;
+        let config: Config = toml::from_str(toml).unwrap();
+        assert_eq!(config.monitoring.log_rotation, LogRotation::Hourly);
+    }
+
+    #[test]
+    fn test_log_rotation_never() {
+        let toml = r#"
+[monitoring]
+log_rotation = "never"
+"#;
+        let config: Config = toml::from_str(toml).unwrap();
+        assert_eq!(config.monitoring.log_rotation, LogRotation::Never);
     }
 }

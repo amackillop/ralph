@@ -25,7 +25,8 @@
 
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
-use std::path::Path;
+use std::path::{Path, PathBuf};
+use tracing_appender::non_blocking::WorkerGuard;
 use tracing_appender::rolling::{RollingFileAppender, Rotation};
 use tracing_subscriber::fmt::time::ChronoUtc;
 use tracing_subscriber::{
@@ -40,6 +41,63 @@ mod notifications;
 mod sandbox;
 mod state;
 mod templates;
+
+/// Set up logging with optional file appender based on config.
+fn setup_logging(
+    filter: EnvFilter,
+    cwd: &Path,
+    monitoring: &config::MonitoringConfig,
+) -> Result<Option<WorkerGuard>> {
+    if monitoring.log_file.is_empty() {
+        Registry::default().with(fmt::layer()).with(filter).init();
+        return Ok(None);
+    }
+
+    let log_file = if Path::new(&monitoring.log_file).is_absolute() {
+        PathBuf::from(&monitoring.log_file)
+    } else {
+        cwd.join(&monitoring.log_file)
+    };
+
+    // Create parent directory if needed
+    if let Some(parent) = log_file.parent() {
+        std::fs::create_dir_all(parent)
+            .with_context(|| format!("Failed to create log directory: {}", parent.display()))?;
+    }
+
+    let rotation = match monitoring.log_rotation {
+        config::LogRotation::Daily => Rotation::DAILY,
+        config::LogRotation::Hourly => Rotation::HOURLY,
+        config::LogRotation::Never => Rotation::NEVER,
+    };
+    let file_appender = RollingFileAppender::new(
+        rotation,
+        log_file.parent().unwrap(),
+        log_file.file_name().unwrap(),
+    );
+    let (non_blocking, guard) = tracing_appender::non_blocking(file_appender);
+
+    let file_layer = if monitoring.log_format == "json" {
+        fmt::layer()
+            .with_writer(non_blocking)
+            .json()
+            .with_timer(ChronoUtc::rfc_3339())
+            .boxed()
+    } else {
+        fmt::layer()
+            .with_writer(non_blocking)
+            .with_timer(ChronoUtc::rfc_3339())
+            .boxed()
+    };
+
+    Registry::default()
+        .with(fmt::layer())
+        .with(file_layer)
+        .with(filter)
+        .init();
+
+    Ok(Some(guard))
+}
 
 #[derive(Parser)]
 #[command(name = "ralph")]
@@ -154,53 +212,8 @@ async fn main() -> Result<()> {
             let cwd = std::env::current_dir().context("Failed to get current directory")?;
             let config = config::Config::load(&cwd).context("Failed to load ralph.toml")?;
 
-            // Set up file appender if log_file is configured
-            let _file_guard = if config.monitoring.log_file.is_empty() {
-                Registry::default().with(fmt::layer()).with(filter).init();
-                None
-            } else {
-                let log_file = if Path::new(&config.monitoring.log_file).is_absolute() {
-                    Path::new(&config.monitoring.log_file).to_path_buf()
-                } else {
-                    cwd.join(&config.monitoring.log_file)
-                };
-
-                // Create parent directory if needed
-                if let Some(parent) = log_file.parent() {
-                    std::fs::create_dir_all(parent).with_context(|| {
-                        format!("Failed to create log directory: {}", parent.display())
-                    })?;
-                }
-
-                let file_appender = RollingFileAppender::new(
-                    Rotation::NEVER,
-                    log_file.parent().unwrap(),
-                    log_file.file_name().unwrap(),
-                );
-                let (non_blocking, guard) = tracing_appender::non_blocking(file_appender);
-
-                let file_layer = if config.monitoring.log_format == "json" {
-                    fmt::layer()
-                        .with_writer(non_blocking)
-                        .json()
-                        .with_timer(ChronoUtc::rfc_3339())
-                        .boxed()
-                } else {
-                    fmt::layer()
-                        .with_writer(non_blocking)
-                        .with_timer(ChronoUtc::rfc_3339())
-                        .boxed()
-                };
-
-                Registry::default()
-                    .with(fmt::layer())
-                    .with(file_layer)
-                    .with(filter)
-                    .init();
-
-                // Keep guard alive for the duration of the loop
-                Some(guard)
-            };
+            // Set up logging with file appender (guard must stay alive for duration)
+            let _file_guard = setup_logging(filter, &cwd, &config.monitoring)?;
 
             // Determine default max_iterations based on mode if not specified
             let effective_max = if unlimited {
