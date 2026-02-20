@@ -64,27 +64,6 @@ pub(crate) fn validate_domain(domain: &str) -> Option<()> {
     Some(())
 }
 
-/// Common domains that should typically be allowed
-#[allow(dead_code)]
-pub const COMMON_ALLOWED_DOMAINS: &[&str] = &[
-    // Git hosting
-    "github.com",
-    "gitlab.com",
-    "bitbucket.org",
-    // Package registries
-    "registry.npmjs.org",
-    "pypi.org",
-    "crates.io",
-    "rubygems.org",
-    "maven.org",
-    // AI APIs
-    "api.anthropic.com",
-    "api.openai.com",
-    // CDNs commonly used by package managers
-    "cdn.jsdelivr.net",
-    "unpkg.com",
-];
-
 #[cfg(test)]
 mod tests {
     use super::*;

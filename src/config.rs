@@ -572,12 +572,6 @@ impl Config {
 
         Ok(config)
     }
-
-    /// Check if current branch is protected
-    #[allow(dead_code)]
-    pub fn is_protected_branch(&self, branch: &str) -> bool {
-        self.git.protected_branches.iter().any(|b| b == branch)
-    }
 }
 
 #[cfg(test)]
