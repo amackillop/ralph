@@ -355,6 +355,12 @@ pub(crate) struct MonitoringConfig {
     #[serde(default = "default_true")]
     pub show_progress: bool,
 
+    /// Maximum consecutive errors before stopping the loop (circuit breaker).
+    /// Set to 0 to disable the limit and continue indefinitely.
+    /// Default: 5
+    #[serde(default = "default_max_consecutive_errors")]
+    pub max_consecutive_errors: u32,
+
     /// Notification configuration.
     #[serde(default)]
     pub notifications: NotificationConfig,
@@ -366,6 +372,7 @@ impl Default for MonitoringConfig {
             log_file: default_log_file(),
             log_format: default_log_format(),
             show_progress: true,
+            max_consecutive_errors: default_max_consecutive_errors(),
             notifications: NotificationConfig::default(),
         }
     }
@@ -462,6 +469,10 @@ fn default_log_file() -> String {
 
 fn default_log_format() -> String {
     "json".to_string()
+}
+
+fn default_max_consecutive_errors() -> u32 {
+    5
 }
 
 impl Config {
@@ -673,5 +684,31 @@ on_error = "sound"
             config.monitoring.notifications.on_error,
             Some("sound".to_string())
         );
+    }
+
+    #[test]
+    fn test_max_consecutive_errors_default() {
+        let config = Config::default();
+        assert_eq!(config.monitoring.max_consecutive_errors, 5);
+    }
+
+    #[test]
+    fn test_max_consecutive_errors_custom() {
+        let toml = r"
+[monitoring]
+max_consecutive_errors = 10
+";
+        let config: Config = toml::from_str(toml).unwrap();
+        assert_eq!(config.monitoring.max_consecutive_errors, 10);
+    }
+
+    #[test]
+    fn test_max_consecutive_errors_disabled() {
+        let toml = r"
+[monitoring]
+max_consecutive_errors = 0
+";
+        let config: Config = toml::from_str(toml).unwrap();
+        assert_eq!(config.monitoring.max_consecutive_errors, 0);
     }
 }
