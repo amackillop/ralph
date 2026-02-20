@@ -139,10 +139,6 @@ enum Commands {
         #[arg(long)]
         unlimited: bool,
 
-        /// Completion promise phrase
-        #[arg(short, long)]
-        completion_promise: Option<String>,
-
         /// Disable Docker sandbox
         #[arg(long)]
         no_sandbox: bool,
@@ -203,7 +199,6 @@ async fn main() -> Result<()> {
             mode,
             max_iterations,
             unlimited,
-            completion_promise,
             no_sandbox,
             prompt,
             provider,
@@ -227,15 +222,7 @@ async fn main() -> Result<()> {
                 })
             };
 
-            commands::loop_cmd::run(
-                mode,
-                effective_max,
-                completion_promise,
-                no_sandbox,
-                prompt,
-                provider,
-            )
-            .await?;
+            commands::loop_cmd::run(mode, effective_max, no_sandbox, prompt, provider).await?;
         }
         Commands::Status => {
             commands::status::run()?;

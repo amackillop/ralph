@@ -56,22 +56,6 @@ pub(crate) async fn get_current_branch(cwd: &Path) -> Result<String> {
     Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
 }
 
-/// Get the current git commit hash (short format).
-pub(crate) async fn get_current_commit_hash(cwd: &Path) -> Result<String> {
-    let output = tokio::process::Command::new("git")
-        .current_dir(cwd)
-        .args(["rev-parse", "--short", "HEAD"])
-        .output()
-        .await
-        .context("Failed to get current commit hash")?;
-
-    if !output.status.success() {
-        bail!("Git rev-parse failed");
-    }
-
-    Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
-}
-
 /// Get the last commit message (first line only).
 pub(crate) async fn get_last_commit_message(cwd: &Path) -> Option<String> {
     let output = tokio::process::Command::new("git")
@@ -116,41 +100,6 @@ pub(crate) async fn count_successful_commits(cwd: &Path, started_at: DateTime<Ut
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[tokio::test]
-    async fn test_get_current_commit_hash() {
-        use std::process::Command;
-
-        // This test requires an actual git repository with at least one commit.
-        // It's skipped if git is not available or if we're not in a git repo.
-        // We test against the current repository rather than creating test commits.
-
-        let cwd = std::env::current_dir().unwrap();
-
-        // Check if we're in a git repo and if git is available
-        let Ok(git_output) = Command::new("git")
-            .args(["rev-parse", "--git-dir"])
-            .current_dir(&cwd)
-            .output()
-        else {
-            // Git not available - skip test
-            return;
-        };
-
-        if !git_output.status.success() {
-            // Not in a git repo - skip test
-            return;
-        }
-
-        // Test getting commit hash from current repo
-        // This uses the actual repository state, not a test commit
-        if let Ok(hash) = get_current_commit_hash(&cwd).await {
-            assert!(!hash.is_empty());
-            // Short hash is typically 7 characters, but can vary
-            assert!(hash.len() >= 7);
-        }
-        // If getting commit hash fails (no commits, etc.), that's acceptable in test environments
-    }
 
     #[tokio::test]
     async fn test_git_push_rejects_protected_branch() {

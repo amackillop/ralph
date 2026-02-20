@@ -1,140 +1,179 @@
 //! Completion detection for Ralph loops.
 //!
-//! Detects when a loop should complete by looking for completion promise
-//! phrases in agent output or `IMPLEMENTATION_PLAN.md`.
+//! Detects when a loop should complete based on agent activity:
+//! validation passes and the agent stops making changes (no new commits).
 
-use anyhow::Result;
 use std::path::Path;
 use tracing::debug;
 
-/// Detects when a Ralph loop should complete based on promise phrases.
+/// Detects when a Ralph loop should complete based on agent idleness.
 ///
-/// Looks for `<promise>PHRASE</promise>` tags in agent output and project files.
+/// The agent is considered "done" when:
+/// - Validation passes (no errors)
+/// - No new commits are created for `idle_threshold` consecutive iterations
+#[derive(Debug)]
 pub(crate) struct CompletionDetector {
-    /// The completion promise phrase to look for.
-    promise: Option<String>,
+    /// Last known commit hash.
+    last_commit: Option<String>,
+    /// Consecutive iterations with no changes (and validation passing).
+    idle_count: u32,
+    /// Number of idle iterations before considering complete.
+    idle_threshold: u32,
 }
 
 impl CompletionDetector {
-    /// Create a new completion detector with an optional promise phrase.
-    pub fn new(promise: Option<&str>) -> Self {
+    /// Create a new completion detector with the given idle threshold.
+    pub fn new(idle_threshold: u32) -> Self {
         Self {
-            promise: promise.map(String::from),
+            last_commit: None,
+            idle_count: 0,
+            idle_threshold,
         }
     }
 
-    /// Check if the loop should complete based on output and file changes
-    pub fn is_complete(&self, output: &str, project_dir: &Path) -> Result<bool> {
-        // Check for completion promise in output
-        if let Some(ref promise) = self.promise {
-            if Self::check_promise_in_text(output, promise) {
-                debug!("Found completion promise in output");
-                return Ok(true);
-            }
-
-            // Also check IMPLEMENTATION_PLAN.md for completion markers
-            let plan_path = project_dir.join("IMPLEMENTATION_PLAN.md");
-            if plan_path.exists() {
-                let plan_content = std::fs::read_to_string(&plan_path)?;
-                if Self::check_promise_in_text(&plan_content, promise) {
-                    debug!("Found completion promise in IMPLEMENTATION_PLAN.md");
-                    return Ok(true);
-                }
-            }
+    /// Record the current commit hash at the start of an iteration.
+    pub fn record_commit(&mut self, commit_hash: Option<String>) {
+        if self.last_commit.is_none() {
+            // First iteration - just record, don't compare
+            self.last_commit = commit_hash;
         }
-
-        Ok(false)
     }
 
-    /// Check if the promise text appears in <promise> tags
-    fn check_promise_in_text(text: &str, promise: &str) -> bool {
-        // Look for <promise>PROMISE_TEXT</promise> pattern
-        let pattern = format!("<promise>{promise}</promise>");
-        if text.contains(&pattern) {
-            return true;
+    /// Check if the loop should complete.
+    ///
+    /// Call this after validation passes. Compares current commit to last known.
+    /// Returns true if agent has been idle for `idle_threshold` iterations.
+    pub fn check_completion(&mut self, current_commit: Option<&str>) -> bool {
+        let changed = match (&self.last_commit, current_commit) {
+            (Some(last), Some(current)) => last != current,
+            (None, Some(_)) => true,           // First commit
+            (Some(_) | None, None) => false,   // No commit info, assume no change
+        };
+
+        if changed {
+            debug!(
+                "Commit changed: {:?} -> {:?}, resetting idle count",
+                self.last_commit, current_commit
+            );
+            self.idle_count = 0;
+            self.last_commit = current_commit.map(String::from);
+        } else {
+            self.idle_count += 1;
+            debug!(
+                "No commit change, idle count: {}/{}",
+                self.idle_count, self.idle_threshold
+            );
         }
 
-        // Also try with whitespace normalization
-        if let Some(extracted) = Self::extract_promise_content(text) {
-            let normalized = extracted.split_whitespace().collect::<Vec<_>>().join(" ");
-            let promise_normalized = promise.split_whitespace().collect::<Vec<_>>().join(" ");
-            if normalized == promise_normalized {
-                return true;
-            }
-        }
-
-        false
+        self.idle_count >= self.idle_threshold
     }
 
-    /// Extract content from <promise>...</promise> tags
-    fn extract_promise_content(text: &str) -> Option<String> {
-        let start_tag = "<promise>";
-        let end_tag = "</promise>";
+    /// Get current idle count (for display/logging).
+    pub fn idle_count(&self) -> u32 {
+        self.idle_count
+    }
+}
 
-        let start_idx = text.find(start_tag)?;
-        let content_start = start_idx + start_tag.len();
-        let end_idx = text[content_start..].find(end_tag)?;
+/// Get current git HEAD commit hash.
+pub(crate) async fn get_commit_hash(project_dir: &Path) -> Option<String> {
+    let output = tokio::process::Command::new("git")
+        .current_dir(project_dir)
+        .args(["rev-parse", "HEAD"])
+        .output()
+        .await
+        .ok()?;
 
-        Some(
-            text[content_start..content_start + end_idx]
-                .trim()
-                .to_string(),
-        )
+    if !output.status.success() {
+        return None;
+    }
+
+    let hash = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    if hash.is_empty() {
+        None
+    } else {
+        Some(hash)
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use tempfile::tempdir;
+
+    const DEFAULT_THRESHOLD: u32 = 2;
 
     #[test]
-    fn test_detect_promise_exact() {
-        let detector = CompletionDetector::new(Some("DONE"));
-        let output = "Task completed. <promise>DONE</promise>";
-        let dir = tempdir().unwrap();
+    fn test_first_iteration_records_commit() {
+        let mut detector = CompletionDetector::new(DEFAULT_THRESHOLD);
+        detector.record_commit(Some("abc123".to_string()));
 
-        assert!(detector.is_complete(output, dir.path()).unwrap());
+        assert_eq!(detector.last_commit, Some("abc123".to_string()));
+        assert_eq!(detector.idle_count, 0);
     }
 
     #[test]
-    fn test_detect_promise_with_whitespace() {
-        let detector = CompletionDetector::new(Some("All tests passing"));
-        let output = "Result: <promise>All tests passing</promise>";
-        let dir = tempdir().unwrap();
+    fn test_commit_change_resets_idle() {
+        let mut detector = CompletionDetector::new(DEFAULT_THRESHOLD);
+        detector.record_commit(Some("abc123".to_string()));
 
-        assert!(detector.is_complete(output, dir.path()).unwrap());
+        // First check - different commit
+        assert!(!detector.check_completion(Some("def456")));
+        assert_eq!(detector.idle_count, 0);
+        assert_eq!(detector.last_commit, Some("def456".to_string()));
     }
 
     #[test]
-    fn test_no_promise_no_completion() {
-        let detector = CompletionDetector::new(Some("DONE"));
-        let output = "Still working on it...";
-        let dir = tempdir().unwrap();
+    fn test_no_change_increments_idle() {
+        let mut detector = CompletionDetector::new(DEFAULT_THRESHOLD);
+        detector.record_commit(Some("abc123".to_string()));
 
-        assert!(!detector.is_complete(output, dir.path()).unwrap());
+        // Same commit
+        assert!(!detector.check_completion(Some("abc123")));
+        assert_eq!(detector.idle_count, 1);
+
+        // Still same commit
+        assert!(detector.check_completion(Some("abc123")));
+        assert_eq!(detector.idle_count, 2);
     }
 
     #[test]
-    fn test_no_promise_configured() {
-        let detector = CompletionDetector::new(None);
-        let output = "Output with <promise>DONE</promise>";
-        let dir = tempdir().unwrap();
+    fn test_idle_threshold_triggers_completion() {
+        let threshold = 3;
+        let mut detector = CompletionDetector::new(threshold);
+        detector.record_commit(Some("abc123".to_string()));
 
-        // Without a promise configured, we never auto-complete
-        assert!(!detector.is_complete(output, dir.path()).unwrap());
+        for i in 0..threshold {
+            let complete = detector.check_completion(Some("abc123"));
+            if i + 1 >= threshold {
+                assert!(complete, "Should complete after {} idles", i + 1);
+            } else {
+                assert!(!complete, "Should not complete after {} idles", i + 1);
+            }
+        }
     }
 
     #[test]
-    fn test_extract_promise_content() {
-        assert_eq!(
-            CompletionDetector::extract_promise_content("foo <promise>DONE</promise> bar"),
-            Some("DONE".to_string())
-        );
+    fn test_change_after_idle_resets() {
+        let mut detector = CompletionDetector::new(DEFAULT_THRESHOLD);
+        detector.record_commit(Some("abc123".to_string()));
 
-        assert_eq!(
-            CompletionDetector::extract_promise_content("no promise here"),
-            None
-        );
+        // Build up idle count
+        detector.check_completion(Some("abc123"));
+        assert_eq!(detector.idle_count, 1);
+
+        // New commit resets
+        detector.check_completion(Some("def456"));
+        assert_eq!(detector.idle_count, 0);
+    }
+
+    #[test]
+    fn test_no_commits_stays_idle() {
+        let mut detector = CompletionDetector::new(DEFAULT_THRESHOLD);
+        detector.record_commit(None);
+
+        assert!(!detector.check_completion(None));
+        assert_eq!(detector.idle_count, 1);
+
+        assert!(detector.check_completion(None));
+        assert_eq!(detector.idle_count, 2);
     }
 }

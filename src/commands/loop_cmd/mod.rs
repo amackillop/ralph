@@ -15,7 +15,7 @@ use tracing::{debug, info, warn};
 
 use crate::agent::{AgentProvider, ClaudeProvider, CursorProvider, Provider};
 use crate::config::Config;
-use crate::detection::CompletionDetector;
+use crate::detection::{get_commit_hash, CompletionDetector};
 use crate::notifications::{NotificationDetails, NotificationEvent, Notifier};
 use crate::sandbox::{DockerSandbox, Sandbox, SandboxError};
 use crate::state::{Mode, RalphState};
@@ -24,7 +24,7 @@ use format::{
     format_banner, format_completion_detected, format_iteration_header, format_loop_finished,
     format_max_iterations_reached, format_progress, BannerInfo, ProgressInfo,
 };
-use git::{get_current_commit_hash, git_push};
+use git::git_push;
 
 // -----------------------------------------------------------------------------
 // Dependency Injection for Testing
@@ -78,7 +78,6 @@ pub(crate) enum TerminationReason {
 pub(crate) async fn run_loop_core(
     deps: LoopDependencies,
     initial_state: RalphState,
-    completion_promise: Option<String>,
 ) -> Result<LoopResult> {
     let LoopDependencies {
         agent,
@@ -92,7 +91,7 @@ pub(crate) async fn run_loop_core(
     state.active = true;
     state.save(&project_dir)?;
 
-    let detector = CompletionDetector::new(completion_promise.as_deref());
+    let mut detector = CompletionDetector::new(config.completion.idle_threshold);
 
     // Create persistent container if sandbox is enabled and reuse is configured
     let persistent_container_name = if let Some(ref sb) = sandbox {
@@ -236,8 +235,9 @@ pub(crate) async fn run_loop_core(
         state.last_iteration_at = Some(chrono::Utc::now());
         state.save(&project_dir)?;
 
-        // Check for completion
-        if detector.is_complete(&output, &project_dir)? {
+        // Check for completion (idle detection - no real git in tests, so always idle)
+        // In real usage, this compares git commit hashes
+        if detector.check_completion(None) {
             state.active = false;
             state.save(&project_dir)?;
             termination_reason = TerminationReason::CompletionDetected;
@@ -270,7 +270,6 @@ pub(crate) async fn run_loop_core(
 pub(crate) async fn run(
     mode: LoopMode,
     max_iterations: Option<u32>,
-    completion_promise: Option<String>,
     no_sandbox: bool,
     custom_prompt: Option<String>,
     provider_override: Option<String>,
@@ -292,7 +291,7 @@ pub(crate) async fn run(
 
     // Load or create state
     let state = RalphState::load_or_create(&cwd, mode.into())?;
-    let mut state = prepare_state(state, max_iterations, completion_promise.clone());
+    let mut state = prepare_state(state, max_iterations);
     state.save(&cwd)?;
 
     // Get agent provider: CLI override takes precedence over config
@@ -352,7 +351,7 @@ pub(crate) async fn run(
         None
     };
 
-    let detector = CompletionDetector::new(completion_promise.as_deref());
+    let mut detector = CompletionDetector::new(config.completion.idle_threshold);
 
     // Initialize notifier
     let notifier = Notifier::new(config.monitoring.notifications.clone());
@@ -398,6 +397,10 @@ pub(crate) async fn run(
 
         // Log iteration start
         tracing::info!(event = "iteration_start", iteration = state.iteration,);
+
+        // Record commit hash at start of iteration (for idle detection)
+        let start_commit = get_commit_hash(&cwd).await;
+        detector.record_commit(start_commit);
 
         // Read prompt
         let mut prompt = std::fs::read_to_string(&prompt_file)
@@ -447,7 +450,7 @@ pub(crate) async fn run(
         };
 
         // Handle agent execution result (including timeouts)
-        let output = match output_result {
+        let _output = match output_result {
             Ok(out) => out,
             Err(e) => {
                 let error_msg = e.to_string();
@@ -667,12 +670,12 @@ pub(crate) async fn run(
         state.last_iteration_at = Some(chrono::Utc::now());
         state.save(&cwd)?;
 
-        // Check for completion
-        if detector.is_complete(&output, &cwd)? {
-            println!(
-                "{}",
-                format_completion_detected(state.completion_promise.as_deref())
-            );
+        // Get commit hash after agent execution (may have created commits)
+        let current_commit = get_commit_hash(&cwd).await;
+
+        // Check for completion: validation passed + agent idle (no new commits)
+        if detector.check_completion(current_commit.as_deref()) {
+            println!("{}", format_completion_detected(detector.idle_count()));
             state.active = false;
             state.save(&cwd)?;
 
@@ -680,22 +683,22 @@ pub(crate) async fn run(
             tracing::info!(
                 event = "loop_end",
                 total_iterations = state.iteration,
-                reason = "completion_detected",
+                reason = "agent_idle",
+                idle_iterations = detector.idle_count(),
             );
 
             // Send completion notification
             let details = NotificationDetails::complete(
                 state.iteration,
                 state.iteration,
-                "completion_detected",
+                "agent_idle",
             );
             notifier.notify(NotificationEvent::Complete, &details).await;
 
             break;
         }
 
-        // Get commit hash after agent execution (may have created commits)
-        let commit_hash = get_current_commit_hash(&cwd).await.ok();
+        let commit_hash = current_commit;
 
         // Git operations
         if config.git.auto_push {
@@ -810,13 +813,8 @@ fn determine_prompt_file(cwd: &Path, mode: LoopMode, custom_prompt: Option<&str>
 }
 
 /// Prepares state with CLI options.
-fn prepare_state(
-    mut state: RalphState,
-    max_iterations: Option<u32>,
-    completion_promise: Option<String>,
-) -> RalphState {
+fn prepare_state(mut state: RalphState, max_iterations: Option<u32>) -> RalphState {
     state.max_iterations = max_iterations;
-    state.completion_promise = completion_promise;
     state.active = true;
     state
 }
@@ -927,7 +925,6 @@ mod tests {
             mode: Mode::Build,
             iteration,
             max_iterations: max,
-            completion_promise: None,
             started_at: Utc::now(),
             last_iteration_at: None,
             error_count: 0,
@@ -966,21 +963,19 @@ mod tests {
     #[test]
     fn test_prepare_state_with_max() {
         let state = make_state(1, None);
-        let prepared = prepare_state(state, Some(10), Some("DONE".to_string()));
+        let prepared = prepare_state(state, Some(10));
 
         assert!(prepared.active);
         assert_eq!(prepared.max_iterations, Some(10));
-        assert_eq!(prepared.completion_promise, Some("DONE".to_string()));
     }
 
     #[test]
     fn test_prepare_state_unlimited() {
         let state = make_state(1, Some(5));
-        let prepared = prepare_state(state, None, None);
+        let prepared = prepare_state(state, None);
 
         assert!(prepared.active);
         assert_eq!(prepared.max_iterations, None);
-        assert_eq!(prepared.completion_promise, None);
     }
 
     #[test]
@@ -1209,7 +1204,6 @@ timeout_minutes = 60
                 mode: Mode::Build,
                 iteration: 1,
                 max_iterations,
-                completion_promise: None,
                 started_at: Utc::now(),
                 last_iteration_at: None,
                 error_count: 0,
@@ -1220,22 +1214,27 @@ timeout_minutes = 60
 
         #[tokio::test]
         async fn test_e2e_loop_max_iterations() {
-            // Test: Loop stops after max iterations
+            // Test: Loop stops after max iterations (before idle detection triggers)
             let (_dir, project_dir) = setup_test_project("Test prompt");
             let prompt_file = project_dir.join("PROMPT_build.md");
 
             let agent = MockAgentProvider::always_succeed("Agent output");
+
+            // Use high idle_threshold so max_iterations triggers first
+            let mut config = test_config();
+            config.completion.idle_threshold = 10;
+
             let deps = LoopDependencies {
                 agent: Box::new(agent.clone()),
                 sandbox: None,
-                config: test_config(),
+                config,
                 project_dir: project_dir.clone(),
                 prompt_file,
             };
 
             let state = test_state(Some(3)); // Max 3 iterations
 
-            let result = run_loop_core(deps, state, None).await.unwrap();
+            let result = run_loop_core(deps, state).await.unwrap();
 
             assert_eq!(result.termination_reason, TerminationReason::MaxIterations);
             assert_eq!(result.final_iteration, 4); // Stopped after iteration > max (4 > 3)
@@ -1244,16 +1243,14 @@ timeout_minutes = 60
         }
 
         #[tokio::test]
-        async fn test_e2e_loop_completion_detection() {
-            // Test: Loop stops when completion promise is detected
+        async fn test_e2e_loop_idle_detection() {
+            // Test: Loop stops when agent is idle (no commits) for idle_threshold iterations
+            // Default idle_threshold is 2, so after 2 idle iterations, loop should complete
             let (_dir, project_dir) = setup_test_project("Test prompt");
             let prompt_file = project_dir.join("PROMPT_build.md");
 
-            // Agent returns completion promise on second call
-            let agent = MockAgentProvider::new(vec![
-                MockResponse::Success("Still working...".to_string()),
-                MockResponse::Success("Done! <promise>TASK_COMPLETE</promise>".to_string()),
-            ]);
+            // Agent produces output but no commits (test has no git repo)
+            let agent = MockAgentProvider::always_succeed("Working...");
 
             let deps = LoopDependencies {
                 agent: Box::new(agent.clone()),
@@ -1263,17 +1260,16 @@ timeout_minutes = 60
                 prompt_file,
             };
 
-            let state = test_state(Some(10)); // High max to ensure completion triggers first
+            let state = test_state(Some(10)); // High max to ensure idle detection triggers first
 
-            let result = run_loop_core(deps, state, Some("TASK_COMPLETE".to_string()))
-                .await
-                .unwrap();
+            let result = run_loop_core(deps, state).await.unwrap();
 
             assert_eq!(
                 result.termination_reason,
                 TerminationReason::CompletionDetected
             );
-            assert_eq!(result.final_iteration, 2); // Completed on iteration 2
+            // With idle_threshold=2, completes after 2 idle iterations
+            assert_eq!(result.final_iteration, 2);
             assert_eq!(agent.invocation_count(), 2);
         }
 
@@ -1283,11 +1279,11 @@ timeout_minutes = 60
             let (_dir, project_dir) = setup_test_project("Test prompt");
             let prompt_file = project_dir.join("PROMPT_build.md");
 
-            // Agent: timeout, then success, then completion
+            // Agent: timeout, then two successes (need 2 for idle detection)
             let agent = MockAgentProvider::new(vec![
                 MockResponse::Timeout,
                 MockResponse::Success("Working...".to_string()),
-                MockResponse::Success("<promise>DONE</promise>".to_string()),
+                MockResponse::Success("Still working...".to_string()),
             ]);
 
             let deps = LoopDependencies {
@@ -1300,9 +1296,7 @@ timeout_minutes = 60
 
             let state = test_state(Some(10));
 
-            let result = run_loop_core(deps, state, Some("DONE".to_string()))
-                .await
-                .unwrap();
+            let result = run_loop_core(deps, state).await.unwrap();
 
             assert_eq!(
                 result.termination_reason,
@@ -1340,7 +1334,7 @@ timeout_minutes = 60
 
             // This will fail validation and increment iteration
             // Note: Since validation always fails, this tests the error accumulation
-            let result = run_loop_core(deps, state, Some("DONE".to_string())).await;
+            let result = run_loop_core(deps, state).await;
 
             // The loop should continue but accumulate errors
             // Since validation always fails, it will hit max iterations
@@ -1368,7 +1362,7 @@ timeout_minutes = 60
 
             let state = test_state(Some(2));
 
-            let _result = run_loop_core(deps, state, None).await.unwrap();
+            let _result = run_loop_core(deps, state).await.unwrap();
 
             // Verify state was saved
             let loaded_state = RalphState::load(&project_dir).unwrap().unwrap();
@@ -1388,6 +1382,7 @@ timeout_minutes = 60
             let mut config = test_config();
             config.sandbox.enabled = true;
             config.sandbox.reuse_container = false;
+            config.completion.idle_threshold = 10; // High threshold so max_iterations wins
 
             let deps = LoopDependencies {
                 agent: Box::new(agent),
@@ -1399,7 +1394,7 @@ timeout_minutes = 60
 
             let state = test_state(Some(2));
 
-            let result = run_loop_core(deps, state, None).await.unwrap();
+            let result = run_loop_core(deps, state).await.unwrap();
 
             assert_eq!(result.termination_reason, TerminationReason::MaxIterations);
         }
@@ -1426,7 +1421,7 @@ timeout_minutes = 60
 
             let state = test_state(Some(100)); // High limit, circuit breaker should trigger first
 
-            let result = run_loop_core(deps, state, None).await.unwrap();
+            let result = run_loop_core(deps, state).await.unwrap();
 
             assert!(matches!(
                 result.termination_reason,
@@ -1441,9 +1436,11 @@ timeout_minutes = 60
             let (_dir, project_dir) = setup_test_project("Test prompt");
             let prompt_file = project_dir.join("PROMPT_build.md");
 
+            // After rate limit, need 2 successful iterations for idle detection
             let agent = MockAgentProvider::new(vec![
                 MockResponse::RateLimit,
-                MockResponse::Success("<promise>DONE</promise>".to_string()),
+                MockResponse::Success("Working...".to_string()),
+                MockResponse::Success("Still working...".to_string()),
             ]);
 
             let deps = LoopDependencies {
@@ -1456,9 +1453,7 @@ timeout_minutes = 60
 
             let state = test_state(Some(10));
 
-            let result = run_loop_core(deps, state, Some("DONE".to_string()))
-                .await
-                .unwrap();
+            let result = run_loop_core(deps, state).await.unwrap();
 
             assert_eq!(
                 result.termination_reason,

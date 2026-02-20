@@ -97,7 +97,6 @@ mod tests {
             mode: Mode::Build,
             iteration,
             max_iterations: None,
-            completion_promise: None,
             started_at: Utc::now(),
             last_iteration_at: None,
             error_count: 0,
@@ -138,7 +137,6 @@ mod tests {
             mode: Mode::Plan,
             iteration: 10,
             max_iterations: Some(50),
-            completion_promise: Some("DONE".to_string()),
             started_at: Utc::now(),
             last_iteration_at: Some(Utc::now()),
             error_count: 0,
@@ -153,7 +151,6 @@ mod tests {
         assert_eq!(updated.mode, Mode::Plan);
         assert_eq!(updated.iteration, 10);
         assert_eq!(updated.max_iterations, Some(50));
-        assert_eq!(updated.completion_promise, Some("DONE".to_string()));
     }
 
     #[test]

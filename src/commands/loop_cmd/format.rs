@@ -22,7 +22,6 @@ pub(crate) struct BannerInfo {
     pub prompt_file: String,
     pub iteration: u32,
     pub max_iterations: Option<u32>,
-    pub promise: Option<String>,
     pub sandbox_enabled: bool,
 }
 
@@ -40,7 +39,6 @@ impl BannerInfo {
             prompt_file: prompt_file.display().to_string(),
             iteration: state.iteration,
             max_iterations: state.max_iterations,
-            promise: state.completion_promise.clone(),
             sandbox_enabled: !no_sandbox && config.sandbox.enabled,
         }
     }
@@ -128,13 +126,6 @@ pub(crate) fn format_banner(info: &BannerInfo) -> String {
             .cyan()
     )
     .unwrap();
-    writeln!(
-        &mut out,
-        "  Promise:    {}",
-        info.promise.as_deref().unwrap_or("none").cyan()
-    )
-    .unwrap();
-
     let sandbox_status = if info.sandbox_enabled {
         "enabled".green()
     } else {
@@ -215,11 +206,11 @@ pub(crate) fn format_max_iterations_reached(max: u32) -> String {
 }
 
 /// Formats the completion detected message.
-pub(crate) fn format_completion_detected(promise: Option<&str>) -> String {
+pub(crate) fn format_completion_detected(idle_count: u32) -> String {
     format!(
-        "\n{} Completion detected: {}",
+        "\n{} Agent idle for {} iterations - task complete.",
         "✅".green(),
-        promise.unwrap_or("task complete")
+        idle_count
     )
 }
 
@@ -284,7 +275,6 @@ mod tests {
             mode: Mode::Plan,
             iteration: 5,
             max_iterations: Some(20),
-            completion_promise: Some("COMPLETE".to_string()),
             started_at: Utc::now(),
             last_iteration_at: None,
             error_count: 0,
@@ -300,7 +290,6 @@ mod tests {
         assert_eq!(banner.mode, "Plan");
         assert_eq!(banner.iteration, 5);
         assert_eq!(banner.max_iterations, Some(20));
-        assert_eq!(banner.promise, Some("COMPLETE".to_string()));
     }
 
     #[test]
@@ -333,7 +322,6 @@ mod tests {
             prompt_file: "/project/PROMPT.md".to_string(),
             iteration: 3,
             max_iterations: Some(10),
-            promise: Some("DONE".to_string()),
             sandbox_enabled: true,
         };
 
@@ -343,7 +331,6 @@ mod tests {
         assert!(output.contains("Build"));
         assert!(output.contains("PROMPT.md"));
         assert!(output.contains("10"));
-        assert!(output.contains("DONE"));
         assert!(output.contains("enabled"));
     }
 
@@ -355,13 +342,11 @@ mod tests {
             prompt_file: "/project/PROMPT_plan.md".to_string(),
             iteration: 1,
             max_iterations: None,
-            promise: None,
             sandbox_enabled: false,
         };
 
         let output = format_banner(&banner);
         assert!(output.contains("unlimited"));
-        assert!(output.contains("none"));
         assert!(output.contains("disabled"));
     }
 
@@ -381,12 +366,10 @@ mod tests {
 
     #[test]
     fn test_format_completion_detected() {
-        let output = format_completion_detected(Some("ALL TESTS PASS"));
-        assert!(output.contains("Completion detected"));
-        assert!(output.contains("ALL TESTS PASS"));
-
-        let output_none = format_completion_detected(None);
-        assert!(output_none.contains("task complete"));
+        let output = format_completion_detected(2);
+        assert!(output.contains("idle"));
+        assert!(output.contains('2'));
+        assert!(output.contains("task complete"));
     }
 
     #[test]

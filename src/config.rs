@@ -388,17 +388,22 @@ impl Default for GitConfig {
 /// Completion detection configuration.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub(crate) struct CompletionConfig {
-    /// Format template for completion promises (use `{}` as placeholder).
-    #[serde(default = "default_promise_format")]
-    pub promise_format: String,
+    /// Number of consecutive idle iterations before stopping.
+    /// An iteration is "idle" if validation passes but no new commits are created.
+    #[serde(default = "default_idle_threshold")]
+    pub idle_threshold: u32,
 }
 
 impl Default for CompletionConfig {
     fn default() -> Self {
         Self {
-            promise_format: default_promise_format(),
+            idle_threshold: default_idle_threshold(),
         }
     }
+}
+
+fn default_idle_threshold() -> u32 {
+    2
 }
 
 /// Log rotation policy.
@@ -413,7 +418,6 @@ pub(crate) enum LogRotation {
     /// Never rotate logs (unbounded growth).
     Never,
 }
-
 /// Monitoring and logging configuration.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub(crate) struct MonitoringConfig {
@@ -545,10 +549,6 @@ fn default_protected_branches() -> Vec<String> {
         "master".to_string(),
         "production".to_string(),
     ]
-}
-
-fn default_promise_format() -> String {
-    "<promise>{}</promise>".to_string()
 }
 
 fn default_log_file() -> String {

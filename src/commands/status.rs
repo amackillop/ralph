@@ -40,7 +40,6 @@ struct StatusDisplay {
     mode: String,
     iteration: u32,
     max_iterations: Option<u32>,
-    promise: Option<String>,
     started_at: String,
     last_iteration_at: Option<String>,
     elapsed_time: String,
@@ -91,7 +90,6 @@ impl StatusDisplay {
             mode: format!("{:?}", state.mode),
             iteration: state.iteration,
             max_iterations: state.max_iterations,
-            promise: state.completion_promise.clone(),
             started_at: state.started_at.format("%Y-%m-%d %H:%M:%S UTC").to_string(),
             last_iteration_at: state
                 .last_iteration_at
@@ -128,12 +126,6 @@ fn format_status(status: Option<&StatusDisplay>) -> String {
             "  Max:        {}",
             s.max_iterations
                 .map_or_else(|| "unlimited".to_string(), |n| n.to_string())
-        )
-        .unwrap();
-        writeln!(
-            &mut out,
-            "  Promise:    {}",
-            s.promise.as_deref().unwrap_or("none")
         )
         .unwrap();
         writeln!(&mut out, "  Started:    {}", s.started_at).unwrap();
@@ -193,12 +185,6 @@ fn format_status_colored(status: Option<&StatusDisplay>) -> String {
             s.max_iterations
                 .map_or_else(|| "unlimited".to_string(), |n| n.to_string())
                 .cyan()
-        )
-        .unwrap();
-        writeln!(
-            &mut out,
-            "  Promise:    {}",
-            s.promise.as_deref().unwrap_or("none").cyan()
         )
         .unwrap();
         writeln!(&mut out, "  Started:    {}", s.started_at.cyan()).unwrap();
@@ -312,7 +298,6 @@ mod tests {
             mode: Mode::Build,
             iteration: 5,
             max_iterations: Some(10),
-            completion_promise: Some("DONE".to_string()),
             started_at: Utc::now(),
             last_iteration_at: None,
             error_count: 0,
@@ -325,7 +310,6 @@ mod tests {
         assert_eq!(status.mode, "Build");
         assert_eq!(status.iteration, 5);
         assert_eq!(status.max_iterations, Some(10));
-        assert_eq!(status.promise, Some("DONE".to_string()));
     }
 
     #[test]
@@ -335,7 +319,6 @@ mod tests {
             mode: "Build".to_string(),
             iteration: 3,
             max_iterations: Some(20),
-            promise: Some("COMPLETE".to_string()),
             started_at: "2024-01-01 12:00:00 UTC".to_string(),
             last_iteration_at: Some("2024-01-01 12:05:00 UTC".to_string()),
             elapsed_time: "15m".to_string(),
@@ -351,7 +334,6 @@ mod tests {
         assert!(output.contains("Build"));
         assert!(output.contains('3'));
         assert!(output.contains("20"));
-        assert!(output.contains("COMPLETE"));
         assert!(output.contains("12:05:00"));
     }
 
@@ -368,7 +350,6 @@ mod tests {
             mode: "Plan".to_string(),
             iteration: 1,
             max_iterations: None,
-            promise: None,
             started_at: "2024-01-01 12:00:00 UTC".to_string(),
             last_iteration_at: None,
             elapsed_time: "2m".to_string(),
@@ -381,7 +362,6 @@ mod tests {
 
         let output = format_status(Some(&status));
         assert!(output.contains("unlimited"));
-        assert!(output.contains("none"));
         assert!(output.contains("inactive"));
     }
 
@@ -392,7 +372,6 @@ mod tests {
             mode: "Build".to_string(),
             iteration: 1,
             max_iterations: None,
-            promise: None,
             started_at: "2024-01-01 12:00:00 UTC".to_string(),
             last_iteration_at: None,
             elapsed_time: "5m 30s".to_string(),
@@ -455,7 +434,6 @@ mod tests {
             mode: Mode::Build,
             iteration: 5,
             max_iterations: Some(10),
-            completion_promise: Some("DONE".to_string()),
             started_at: Utc::now() - Duration::minutes(30),
             last_iteration_at: Some(Utc::now() - Duration::minutes(2)),
             error_count: 0,
@@ -478,7 +456,6 @@ mod tests {
             mode: Mode::Build,
             iteration: 10,
             max_iterations: Some(20),
-            completion_promise: None,
             started_at: Utc::now() - Duration::hours(1),
             last_iteration_at: Some(Utc::now() - Duration::minutes(5)),
             error_count: 3,
@@ -501,7 +478,6 @@ mod tests {
             mode: "Build".to_string(),
             iteration: 5,
             max_iterations: Some(10),
-            promise: None,
             started_at: "2024-01-01 12:00:00 UTC".to_string(),
             last_iteration_at: None,
             elapsed_time: "30m".to_string(),
@@ -526,7 +502,6 @@ mod tests {
             mode: "Build".to_string(),
             iteration: 5,
             max_iterations: Some(10),
-            promise: None,
             started_at: "2024-01-01 12:00:00 UTC".to_string(),
             last_iteration_at: None,
             elapsed_time: "30m".to_string(),
@@ -551,7 +526,6 @@ mod tests {
             mode: "Build".to_string(),
             iteration: 5,
             max_iterations: Some(10),
-            promise: None,
             started_at: "2024-01-01 12:00:00 UTC".to_string(),
             last_iteration_at: None,
             elapsed_time: "30m".to_string(),

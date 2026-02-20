@@ -35,8 +35,6 @@ pub(crate) struct RalphState {
     pub iteration: u32,
     /// Maximum iterations before auto-stop (None = unlimited).
     pub max_iterations: Option<u32>,
-    /// Phrase that signals loop completion when detected.
-    pub completion_promise: Option<String>,
     /// When the loop was started.
     pub started_at: DateTime<Utc>,
     /// When the last iteration completed.
@@ -60,7 +58,6 @@ impl Default for RalphState {
             mode: Mode::Build,
             iteration: 1,
             max_iterations: None,
-            completion_promise: None,
             started_at: Utc::now(),
             last_iteration_at: None,
             error_count: 0,
@@ -129,7 +126,6 @@ mod tests {
             mode,
             iteration: 5,
             max_iterations: Some(20),
-            completion_promise: Some("DONE".to_string()),
             started_at: Utc::now(),
             last_iteration_at: Some(Utc::now()),
             error_count: 0,
@@ -150,7 +146,6 @@ mod tests {
         assert_eq!(loaded.mode, state.mode);
         assert_eq!(loaded.iteration, state.iteration);
         assert_eq!(loaded.max_iterations, state.max_iterations);
-        assert_eq!(loaded.completion_promise, state.completion_promise);
         assert_eq!(loaded.error_count, state.error_count);
         assert_eq!(loaded.consecutive_errors, state.consecutive_errors);
         assert_eq!(loaded.last_error, state.last_error);
@@ -206,7 +201,6 @@ mod tests {
         assert_eq!(state.mode, Mode::Build);
         assert_eq!(state.iteration, 1);
         assert!(state.max_iterations.is_none());
-        assert!(state.completion_promise.is_none());
         assert!(state.last_iteration_at.is_none());
         assert_eq!(state.error_count, 0);
         assert_eq!(state.consecutive_errors, 0);
@@ -250,7 +244,6 @@ mod tests {
             mode: Mode::Build,
             iteration: 5,
             max_iterations: Some(10),
-            completion_promise: None,
             started_at: Utc::now(),
             last_iteration_at: Some(Utc::now()),
             error_count: 3,
