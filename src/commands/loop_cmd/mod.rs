@@ -1121,13 +1121,13 @@ mod tests {
     #[test]
     fn test_resolve_timeout_uses_provider_specific() {
         // Provider timeout should override global
-        let toml = r#"
+        let toml = r"
 [agent.cursor]
 timeout_minutes = 120
 
 [sandbox.resources]
 timeout_minutes = 60
-"#;
+";
         let config: Config = toml::from_str(toml).unwrap();
         assert_eq!(resolve_timeout(&config, Provider::Cursor), 120);
     }
@@ -1135,10 +1135,10 @@ timeout_minutes = 60
     #[test]
     fn test_resolve_timeout_falls_back_to_global() {
         // No provider timeout - should use global
-        let toml = r#"
+        let toml = r"
 [sandbox.resources]
 timeout_minutes = 45
-"#;
+";
         let config: Config = toml::from_str(toml).unwrap();
         assert_eq!(resolve_timeout(&config, Provider::Cursor), 45);
         assert_eq!(resolve_timeout(&config, Provider::Claude), 45);
@@ -1147,7 +1147,7 @@ timeout_minutes = 45
     #[test]
     fn test_resolve_timeout_different_providers() {
         // Different timeouts for different providers
-        let toml = r#"
+        let toml = r"
 [agent.cursor]
 timeout_minutes = 30
 
@@ -1156,7 +1156,7 @@ timeout_minutes = 180
 
 [sandbox.resources]
 timeout_minutes = 60
-"#;
+";
         let config: Config = toml::from_str(toml).unwrap();
         assert_eq!(resolve_timeout(&config, Provider::Cursor), 30);
         assert_eq!(resolve_timeout(&config, Provider::Claude), 180);
