@@ -36,8 +36,7 @@ Work in atomic, focused commits. Each commit should represent a single logical c
 1. `just check` passes
 2. `just coverage` meets threshold
 
- Follow the seven rules:
-
+Follow the seven rules:
 - Separate subject from body with blank line
 - Limit subject to 50 characters (72 hard limit)
 - Capitalize subject line
@@ -45,12 +44,24 @@ Work in atomic, focused commits. Each commit should represent a single logical c
 - Use imperative mood in subject (e.g., "Fix bug" not "Fixed bug" or "Fixes bug")
 - Wrap body at 72 characters
 - Body explains what and why, not how
-- The diff explains how
+- Provide useful context about the change for future reference.
+- The code diff explains how
 
 Subject test: "If applied, this commit will [subject]" must make sense.
 
-Like how a comment provides important context for a line of code, the commit message
-should provide important context for the change being committed.
+When asked to make a commit, write the commit message to
+commit-message.txt in the workspace root. Do not run git commit directly.
+The engineer will review the message and commit manually.
+
+Avoid listing bullet points that are obvious from the code diff.
+
+Consider the commit message as a work of art. It should be a masterpiece.
+Nobody should ever need to wonder why a particular change was made.
+
+Any important decision made according to the plan should be documented in the
+commit message. This is important for the why of the change.
+
+Finally, DO NOT ADD CLAUDE ATTRIBUTIONS TO THE COMMIT MESSAGE.
 
 After committing, push immediately.
 

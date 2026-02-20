@@ -50,11 +50,11 @@ worktree branch:
     git worktree add "$worktree_dir" -b "$branch" 2>/dev/null || \
         git worktree add "$worktree_dir" "$branch"
 
-    # Configure agent signing directly in the worktree
-    git -C "$worktree_dir" config --worktree user.name "Ralph"
-    git -C "$worktree_dir" config --worktree user.email "ralph@localhost"
-    git -C "$worktree_dir" config --worktree user.signingkey "~/.ssh/ralph_signing"
-    git -C "$worktree_dir" config --worktree gpg.format ssh
+    # Configure agent identity and signing in the worktree
+    git -C "$worktree_dir" config --worktree user.name "kitaebot"
+    git -C "$worktree_dir" config --worktree user.email "kitaebot@pm.me"
+    git -C "$worktree_dir" config --worktree user.signingkey "D90B07BF61863EA1"
     git -C "$worktree_dir" config --worktree commit.gpgsign true
+    git -C "$worktree_dir" config --worktree core.sshCommand "ssh -i ~/.ssh/kitaebot -o IdentitiesOnly=yes"
 
     echo "Worktree created at $worktree_dir"
