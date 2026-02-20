@@ -14,6 +14,7 @@ provider = "cursor"
 path = "agent"           # "cursor-agent" on NixOS
 output_format = "text"
 sandbox = "disabled"     # Required for shell access
+timeout_minutes = 60     # Optional: override sandbox timeout for Cursor
 ```
 
 Invocation: `agent -p "prompt" --sandbox disabled --output-format text`
@@ -30,7 +31,9 @@ provider = "claude"
 path = "claude"
 model = "opus"           # Recommended for primary agent
 skip_permissions = true  # Required for autonomous operation
-output_format = "stream-json"
+output_format = "text"
+timeout_minutes = 120    # Optional: override sandbox timeout for Claude
+verbose = false          # Optional: enable verbose output
 ```
 
 Invocation: `claude -p --dangerously-skip-permissions --model opus < prompt`
