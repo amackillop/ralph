@@ -459,9 +459,17 @@ impl Default for MonitoringConfig {
 }
 
 /// Notification configuration for loop completion and errors.
+///
+/// Both `on_complete` and `on_error` support the same notification types:
+/// - `"webhook:<url>"` - POST to webhook URL
+/// - `"desktop"` - Desktop notification (notify-send/osascript)
+/// - `"sound"` - Sound alert (system sound or bell)
+/// - `"none"` or omit - No notification
+///
+/// For backward compatibility, bare URLs (without `webhook:` prefix) are treated as webhooks.
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub(crate) struct NotificationConfig {
-    /// Webhook URL to POST to on completion (optional).
+    /// Notification method on completion: "webhook:<url>", "desktop", "sound", or "none".
     #[serde(default)]
     pub on_complete: Option<String>,
 

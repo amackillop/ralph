@@ -48,29 +48,53 @@ impl Notifier {
 
     /// Send completion notification.
     async fn notify_complete(&self, details: &NotificationDetails) {
-        if let Some(ref webhook_url) = self.config.on_complete {
-            if let Err(e) = self.send_webhook(webhook_url, "complete", details).await {
-                warn!("Failed to send completion webhook: {}", e);
-            }
+        if let Some(ref value) = self.config.on_complete {
+            self.send_notification(value, "complete", "Ralph Loop Complete", details)
+                .await;
         }
     }
 
     /// Send error notification.
     async fn notify_error(&self, details: &NotificationDetails) {
-        if let Some(ref on_error) = self.config.on_error {
-            if on_error.starts_with("webhook:") {
-                let url = on_error.strip_prefix("webhook:").unwrap_or("");
-                if !url.is_empty() {
-                    if let Err(e) = self.send_webhook(url, "error", details).await {
-                        warn!("Failed to send error webhook: {}", e);
-                    }
+        if let Some(ref value) = self.config.on_error {
+            self.send_notification(value, "error", "Ralph Loop Error", details)
+                .await;
+        }
+    }
+
+    /// Parse notification value and send appropriate notification.
+    ///
+    /// Supports:
+    /// - `"webhook:<url>"` - POST to webhook
+    /// - `"desktop"` - Desktop notification
+    /// - `"sound"` - Sound alert
+    /// - Bare URL (backward compat) - Treated as webhook
+    async fn send_notification(
+        &self,
+        value: &str,
+        event_type: &str,
+        title: &str,
+        details: &NotificationDetails,
+    ) {
+        if value.starts_with("webhook:") {
+            let url = value.strip_prefix("webhook:").unwrap_or("");
+            if !url.is_empty() {
+                if let Err(e) = self.send_webhook(url, event_type, details).await {
+                    warn!("Failed to send {} webhook: {}", event_type, e);
                 }
-            } else if on_error == "desktop" {
-                if let Err(e) = send_desktop_notification("Ralph Loop Error", &details.message) {
-                    warn!("Failed to send desktop notification: {}", e);
-                }
-            } else if on_error == "sound" {
-                play_sound();
+            }
+        } else if value == "desktop" {
+            if let Err(e) = send_desktop_notification(title, &details.message) {
+                warn!("Failed to send desktop notification: {}", e);
+            }
+        } else if value == "sound" {
+            play_sound();
+        } else if value == "none" {
+            // Explicitly disabled
+        } else if value.starts_with("http://") || value.starts_with("https://") {
+            // Backward compatibility: bare URL treated as webhook
+            if let Err(e) = self.send_webhook(value, event_type, details).await {
+                warn!("Failed to send {} webhook: {}", event_type, e);
             }
         }
     }
@@ -412,6 +436,55 @@ mod tests {
         let notifier = Notifier::new(config);
         let details = NotificationDetails::error(Some(1), "err", None);
         notifier.notify(NotificationEvent::Error, &details).await;
+    }
+
+    #[tokio::test]
+    async fn test_notifier_notify_complete_desktop() {
+        // Desktop notification on complete - may fail but shouldn't panic
+        let config = NotificationConfig {
+            on_complete: Some("desktop".to_string()),
+            on_error: None,
+        };
+        let notifier = Notifier::new(config);
+        let details = NotificationDetails::complete(1, 1, "done");
+        notifier.notify(NotificationEvent::Complete, &details).await;
+    }
+
+    #[tokio::test]
+    async fn test_notifier_notify_complete_sound() {
+        // Sound notification on complete - fires and forgets
+        let config = NotificationConfig {
+            on_complete: Some("sound".to_string()),
+            on_error: None,
+        };
+        let notifier = Notifier::new(config);
+        let details = NotificationDetails::complete(1, 1, "done");
+        notifier.notify(NotificationEvent::Complete, &details).await;
+    }
+
+    #[tokio::test]
+    async fn test_notifier_notify_complete_webhook_prefixed() {
+        // webhook: prefix on complete
+        let config = NotificationConfig {
+            on_complete: Some("webhook:".to_string()),
+            on_error: None,
+        };
+        let notifier = Notifier::new(config);
+        let details = NotificationDetails::complete(1, 1, "done");
+        // Empty URL should be handled gracefully
+        notifier.notify(NotificationEvent::Complete, &details).await;
+    }
+
+    #[tokio::test]
+    async fn test_notifier_notify_complete_none() {
+        // Explicit "none" disables notification
+        let config = NotificationConfig {
+            on_complete: Some("none".to_string()),
+            on_error: None,
+        };
+        let notifier = Notifier::new(config);
+        let details = NotificationDetails::complete(1, 1, "done");
+        notifier.notify(NotificationEvent::Complete, &details).await;
     }
 
     #[test]
