@@ -16,7 +16,9 @@ output_format = "text"
 sandbox = "disabled"     # Required for shell access
 ```
 
-Invocation: `agent -p --sandbox disabled --output-format text < prompt`
+Invocation: `agent -p "prompt" --sandbox disabled --output-format text`
+
+Note: Cursor CLI takes prompt as `-p` argument.
 
 ### Claude Code CLI
 
@@ -32,6 +34,8 @@ output_format = "stream-json"
 ```
 
 Invocation: `claude -p --dangerously-skip-permissions --model opus < prompt`
+
+Note: Claude CLI takes prompt via stdin, `-p` enables print mode.
 
 ## Provider Selection
 
@@ -53,5 +57,5 @@ trait AgentProvider {
 
 1. Provider configurable via config and CLI flag
 2. Clear error messages when agent CLI not found
-3. Prompt passed via stdin, output captured from stdout
+3. Prompt delivered to agent (stdin for Claude, CLI arg for Cursor), output captured from stdout
 4. Non-zero exit codes reported as errors
