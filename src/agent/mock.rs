@@ -5,7 +5,7 @@
 
 use anyhow::Result;
 use async_trait::async_trait;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 
@@ -35,6 +35,9 @@ pub(crate) enum MockResponse {
     Timeout,
     /// Return an error that looks like a rate limit.
     RateLimit,
+    /// Succeed but also cancel the loop (sets state.active = false).
+    /// Used to test external cancellation during loop execution.
+    SuccessAndCancel(String, PathBuf),
 }
 
 impl MockAgentProvider {
@@ -81,6 +84,14 @@ impl AgentProvider for MockAgentProvider {
             MockResponse::Timeout => anyhow::bail!("Agent execution timed out after 60 minutes"),
             MockResponse::RateLimit => {
                 anyhow::bail!("rate limit exceeded (resource_exhausted)")
+            }
+            MockResponse::SuccessAndCancel(output, project_dir) => {
+                // Simulate external cancellation by setting state.active = false
+                if let Some(mut state) = crate::state::RalphState::load(project_dir)? {
+                    state.active = false;
+                    state.save(project_dir)?;
+                }
+                Ok(output.clone())
             }
         }
     }

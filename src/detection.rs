@@ -46,8 +46,8 @@ impl CompletionDetector {
     pub fn check_completion(&mut self, current_commit: Option<&str>) -> bool {
         let changed = match (&self.last_commit, current_commit) {
             (Some(last), Some(current)) => last != current,
-            (None, Some(_)) => true,           // First commit
-            (Some(_) | None, None) => false,   // No commit info, assume no change
+            (None, Some(_)) => true,         // First commit
+            (Some(_) | None, None) => false, // No commit info, assume no change
         };
 
         if changed {
