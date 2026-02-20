@@ -10,6 +10,7 @@ Initialize a project for Ralph:
 - Creates `ralph.toml` with defaults
 - Creates `PROMPT_plan.md` and `PROMPT_build.md` templates
 - Creates `AGENTS.md` template
+- Creates `.cursor/rules/ralph.mdc` (Ralph rules for Cursor)
 - Prints instructions to create `specs/` directory
 
 ```bash
@@ -25,7 +26,6 @@ Run the main Ralph loop:
 ralph loop plan                              # Planning mode
 ralph loop build                             # Build mode (default)
 ralph loop build -m 20                       # Limit iterations (--max-iterations)
-ralph loop build -c "ALL TESTS PASS"         # Stop on promise (--completion-promise)
 ralph loop build --provider claude           # Override provider
 ralph loop build --no-sandbox                # Disable sandbox
 ralph loop build --unlimited                 # No iteration limit
@@ -42,7 +42,7 @@ Stop a running loop gracefully.
 
 ### `ralph revert`
 
-Revert Ralph commits from failed iterations:
+Revert commits from failed iterations. Ralph should always be run on a branch with only its commits:
 
 ```bash
 ralph revert                # Revert last commit (default)

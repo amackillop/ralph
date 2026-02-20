@@ -26,8 +26,23 @@ pub(crate) fn run(all: bool) -> Result<()> {
         },
     )?;
 
+    // Clean up empty directories
+    for dir in cleanable_dirs() {
+        let abs_dir = cwd.join(&dir);
+        if abs_dir.is_dir() && is_dir_empty(&abs_dir) {
+            let _ = fs::remove_dir(&abs_dir);
+        }
+    }
+
     print!("{}", format_results(&removed));
     Ok(())
+}
+
+/// Returns true if a directory is empty.
+fn is_dir_empty(path: &Path) -> bool {
+    path.read_dir()
+        .map(|mut entries| entries.next().is_none())
+        .unwrap_or(false)
 }
 
 // -----------------------------------------------------------------------------
@@ -47,6 +62,16 @@ fn config_files() -> Vec<PathBuf> {
         PathBuf::from("PROMPT_build.md"),
         PathBuf::from("AGENTS.md"),
         PathBuf::from("IMPLEMENTATION_PLAN.md"),
+        PathBuf::from(".cursor/rules/ralph.mdc"),
+    ]
+}
+
+/// Returns directories that should be cleaned up if empty after file removal.
+fn cleanable_dirs() -> Vec<PathBuf> {
+    vec![
+        PathBuf::from(".cursor/rules"),
+        PathBuf::from(".cursor"),
+        PathBuf::from(".ralph"),
     ]
 }
 
@@ -120,6 +145,15 @@ mod tests {
         let files = config_files();
         assert!(files.contains(&PathBuf::from("ralph.toml")));
         assert!(files.contains(&PathBuf::from("AGENTS.md")));
+        assert!(files.contains(&PathBuf::from(".cursor/rules/ralph.mdc")));
+    }
+
+    #[test]
+    fn test_cleanable_dirs() {
+        let dirs = cleanable_dirs();
+        assert!(dirs.contains(&PathBuf::from(".cursor/rules")));
+        assert!(dirs.contains(&PathBuf::from(".cursor")));
+        assert!(dirs.contains(&PathBuf::from(".ralph")));
     }
 
     #[test]
