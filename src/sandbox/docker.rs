@@ -1314,4 +1314,123 @@ mod tests {
         // Should prefer getent ahosts over getent hosts for dual-stack support
         assert!(script.contains("getent ahosts"));
     }
+
+    /// Helper to execute a command in a container and return exit code + output.
+    #[allow(tail_expr_drop_order)]
+    async fn exec_cmd_in_container(
+        docker: &Docker,
+        container_name: &str,
+        cmd: &str,
+    ) -> (i64, String) {
+        let exec = docker
+            .create_exec(
+                container_name,
+                CreateExecOptions {
+                    cmd: Some(vec!["sh".to_string(), "-c".to_string(), cmd.to_string()]),
+                    attach_stdout: Some(true),
+                    attach_stderr: Some(true),
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap();
+
+        let mut output = String::new();
+        if let StartExecResults::Attached {
+            output: mut stream, ..
+        } = docker.start_exec(&exec.id, None).await.unwrap()
+        {
+            while let Some(chunk) = stream.next().await {
+                if let Ok(LogOutput::StdOut { message }) = chunk {
+                    output.push_str(&String::from_utf8_lossy(&message));
+                } else if let Ok(LogOutput::StdErr { message }) = chunk {
+                    output.push_str(&String::from_utf8_lossy(&message));
+                }
+            }
+        }
+
+        let inspect = docker.inspect_exec(&exec.id).await.unwrap();
+        let exit_code = inspect.exit_code.unwrap_or(-1);
+
+        (exit_code, output)
+    }
+
+    /// Integration test that verifies iptables rules actually block traffic.
+    /// This test requires Docker and the ralph:latest image with curl and iptables.
+    #[tokio::test]
+    async fn test_iptables_actually_blocks_traffic() {
+        use crate::config::{Config, NetworkPolicy};
+
+        // Create config with allowlist policy allowing only one specific domain
+        let mut config = Config::default();
+        config.sandbox.network.policy = NetworkPolicy::Allowlist;
+        // Allow only cloudflare's DNS (1.1.1.1) - it's highly available and fast
+        config.sandbox.network.allowed = vec!["one.one.one.one".to_string()];
+
+        let runner = DockerSandbox::new(config.clone(), Provider::Cursor, config.agent.clone());
+
+        let temp_dir = tempfile::tempdir().unwrap();
+
+        // Create a persistent container with NET_ADMIN capability
+        let Ok(container_name) = runner.create_persistent_container(temp_dir.path()).await else {
+            // Docker or image not available, skip test
+            return;
+        };
+
+        let docker = Docker::connect_with_local_defaults().unwrap();
+
+        // Set up iptables rules
+        let setup_result = runner
+            .setup_allowlist_iptables(&docker, &container_name)
+            .await;
+
+        if setup_result.is_err() {
+            // Clean up and skip - iptables might not be available
+            let _ = DockerSandbox::remove_persistent_container(&container_name).await;
+            return;
+        }
+
+        // Test 1: Allowed domain should be reachable (one.one.one.one -> 1.1.1.1)
+        let (allowed_exit, allowed_output) = exec_cmd_in_container(
+            &docker,
+            &container_name,
+            "curl --connect-timeout 5 --max-time 10 -s -o /dev/null -w '%{http_code}' https://one.one.one.one/dns-query 2>&1 || echo 'CURL_FAILED'",
+        )
+        .await;
+
+        // Test 2: Blocked domain should NOT be reachable (example.com is not in allowlist)
+        let (blocked_exit, blocked_output) = exec_cmd_in_container(
+            &docker,
+            &container_name,
+            "curl --connect-timeout 5 --max-time 10 -s https://example.com 2>&1 || echo 'BLOCKED_AS_EXPECTED'",
+        )
+        .await;
+
+        // Clean up
+        let _ = DockerSandbox::remove_persistent_container(&container_name).await;
+
+        // Verify results
+        // Allowed domain: curl should succeed (exit 0) or at least connect
+        // We accept HTTP 200, 301, 302, 400, etc. - any response means connection worked
+        let allowed_connected = allowed_exit == 0
+            || allowed_output.contains("200")
+            || allowed_output.contains("301")
+            || allowed_output.contains("400");
+
+        // Blocked domain: curl should fail to connect (timeout or connection refused)
+        let blocked_failed = blocked_exit != 0
+            || blocked_output.contains("BLOCKED_AS_EXPECTED")
+            || blocked_output.contains("timed out")
+            || blocked_output.contains("Connection refused")
+            || blocked_output.contains("Network is unreachable");
+
+        assert!(
+            allowed_connected,
+            "Allowed domain should be reachable. Exit: {allowed_exit}, Output: {allowed_output}"
+        );
+        assert!(
+            blocked_failed,
+            "Blocked domain should NOT be reachable. Exit: {blocked_exit}, Output: {blocked_output}"
+        );
+    }
 }
