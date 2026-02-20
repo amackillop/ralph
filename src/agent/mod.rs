@@ -8,6 +8,8 @@
 
 mod claude;
 mod cursor;
+#[cfg(test)]
+pub(crate) mod mock;
 
 pub(crate) use claude::ClaudeProvider;
 pub(crate) use cursor::CursorProvider;
