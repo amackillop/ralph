@@ -101,8 +101,22 @@ timeout_minutes = 60
 # Auto-push after each iteration
 auto_push = true
 
+# Automatically create PR when branch work completes
+auto_pr = true
+
+# Base branch for pull requests
+pr_base = "master"
+
 # Protected branches (ralph cannot force-push to these)
 protected_branches = ["main", "master", "production"]
+
+# Worktree identity configuration for bot commits (optional)
+# When configured, Ralph applies these via `git config --worktree`
+# [git.worktree]
+# name = "ralph-bot"
+# email = "ralph-bot@example.com"
+# signing_key = "ABCD1234"  # GPG key ID (optional)
+# ssh_key = "~/.ssh/ralph-bot"  # SSH key path (optional)
 
 [completion]
 # Number of consecutive idle iterations before stopping.

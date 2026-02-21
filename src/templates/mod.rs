@@ -35,6 +35,9 @@ mod tests {
         assert!(config.sandbox.enabled);
         assert_eq!(config.sandbox.image, "ralph:latest");
         assert!(config.git.auto_push);
+        assert!(config.git.auto_pr);
+        assert_eq!(config.git.pr_base, "master");
+        assert!(config.git.worktree.is_none()); // Commented out in template
         assert_eq!(config.completion.idle_threshold, 2);
         assert!(config.validation.enabled);
         assert_eq!(config.validation.command, "nix flake check --quiet");
