@@ -59,6 +59,13 @@ impl std::str::FromStr for Provider {
     }
 }
 
+/// Returns true if running inside a Nix sandbox where shell scripts may not work.
+/// Nix sandboxes have a minimal environment without /bin/sh or /usr/bin/env.
+#[cfg(test)]
+pub(crate) fn is_nix_sandbox() -> bool {
+    std::env::var("NIX_BUILD_TOP").is_ok()
+}
+
 /// Creates a mock executable script for testing.
 /// Handles the "Text file busy" (ETXTBSY) race condition that can occur
 /// when creating and immediately executing scripts, especially in release mode.

@@ -26,7 +26,33 @@ use format::{
     format_banner, format_completion_detected, format_iteration_header, format_loop_finished,
     format_max_iterations_reached, format_progress, BannerInfo, ProgressInfo,
 };
-use git::git_push;
+use git::{check_gh_available, create_pull_request, git_push};
+use worktree::{
+    configure_worktree_identity, copy_plan_to_worktree, create_worktree, enable_worktree_config,
+    parse_implementation_plan, worktree_path, BranchSection,
+};
+
+/// Check if a branch section has incomplete tasks.
+///
+/// Returns true if the branch has any unchecked `- [ ]` tasks before the next
+/// `## Branch:` header.
+fn is_branch_incomplete(plan_content: &str, branch_name: &str) -> bool {
+    let header = format!("## Branch: {branch_name}");
+    let Some(start) = plan_content.find(&header) else {
+        return false;
+    };
+
+    // Find where this branch section ends (next ## Branch: or end of file)
+    let section_start = start + header.len();
+    let section_end = plan_content[section_start..]
+        .find("## Branch:")
+        .map_or(plan_content.len(), |pos| section_start + pos);
+
+    let section = &plan_content[section_start..section_end];
+
+    // Check for any unchecked tasks
+    section.contains("- [ ]")
+}
 
 // -----------------------------------------------------------------------------
 // Dependency Injection for Testing
@@ -300,6 +326,515 @@ pub(crate) async fn run_loop_core(
 }
 
 // -----------------------------------------------------------------------------
+// Branch Build Types
+// -----------------------------------------------------------------------------
+
+/// Result of building a single branch.
+#[derive(Debug, Clone)]
+pub(crate) struct BranchResult {
+    /// Branch name.
+    pub branch: String,
+    /// Whether the build succeeded.
+    pub success: bool,
+    /// Final iteration count.
+    pub iterations: u32,
+    /// Error message if failed.
+    pub error: Option<String>,
+    /// PR URL if created.
+    pub pr_url: Option<String>,
+}
+
+impl BranchResult {
+    fn success(branch: &str, iterations: u32, pr_url: Option<String>) -> Self {
+        Self {
+            branch: branch.to_string(),
+            success: true,
+            iterations,
+            error: None,
+            pr_url,
+        }
+    }
+
+    fn failure(branch: &str, iterations: u32, error: String) -> Self {
+        Self {
+            branch: branch.to_string(),
+            success: false,
+            iterations,
+            error: Some(error),
+            pr_url: None,
+        }
+    }
+}
+
+// -----------------------------------------------------------------------------
+// Branch Build Execution
+// -----------------------------------------------------------------------------
+
+/// Execute builds for all branches in parallel or sequential mode.
+#[allow(tail_expr_drop_order)]
+async fn execute_branch_builds(
+    branches: Vec<BranchSection>,
+    config: &Config,
+    max_iterations: Option<u32>,
+    no_sandbox: bool,
+    provider_override: Option<&str>,
+    sequential: bool,
+) -> Result<Vec<BranchResult>> {
+    let cwd = std::env::current_dir().context("Failed to get current directory")?;
+
+    // Enable worktree config extension
+    enable_worktree_config(&cwd).await?;
+
+    // Check if gh CLI is available for PR creation
+    let gh_available = config.git.auto_pr && check_gh_available().await;
+    if config.git.auto_pr && !gh_available {
+        warn!("gh CLI not available or not authenticated. PRs will not be created automatically.");
+    }
+
+    // Prepare worktrees for all branches
+    info!("Preparing {} worktrees...", branches.len());
+    for branch in &branches {
+        // Create worktree
+        if let Err(e) = create_worktree(&cwd, &branch.name).await {
+            // Branch may already exist, try to continue
+            warn!("Failed to create worktree for '{}': {}", branch.name, e);
+            continue;
+        }
+
+        // Configure identity if specified
+        if let Some(ref wt_config) = config.git.worktree {
+            if let Err(e) = configure_worktree_identity(&cwd, &branch.name, wt_config).await {
+                warn!("Failed to configure identity for '{}': {}", branch.name, e);
+            }
+        }
+
+        // Copy implementation plan
+        if let Err(e) = copy_plan_to_worktree(&cwd, &branch.name) {
+            warn!("Failed to copy plan to '{}': {}", branch.name, e);
+        }
+    }
+
+    // Execute builds
+    let results = if sequential {
+        execute_sequential(
+            &cwd,
+            branches,
+            config,
+            max_iterations,
+            no_sandbox,
+            provider_override,
+            gh_available,
+        )
+        .await
+    } else {
+        execute_parallel(
+            &cwd,
+            branches,
+            config,
+            max_iterations,
+            no_sandbox,
+            provider_override,
+            gh_available,
+        )
+        .await
+    };
+
+    results
+}
+
+/// Execute branch builds sequentially.
+async fn execute_sequential(
+    project_dir: &Path,
+    branches: Vec<BranchSection>,
+    config: &Config,
+    max_iterations: Option<u32>,
+    no_sandbox: bool,
+    provider_override: Option<&str>,
+    gh_available: bool,
+) -> Result<Vec<BranchResult>> {
+    let mut results = Vec::with_capacity(branches.len());
+
+    for branch in branches {
+        info!("Building branch '{}' sequentially...", branch.name);
+        let result = build_single_branch(
+            project_dir,
+            &branch,
+            config,
+            max_iterations,
+            no_sandbox,
+            provider_override,
+            gh_available,
+        )
+        .await;
+        results.push(result);
+    }
+
+    Ok(results)
+}
+
+/// Execute branch builds in parallel using tokio `JoinSet`.
+#[allow(tail_expr_drop_order)]
+async fn execute_parallel(
+    project_dir: &Path,
+    branches: Vec<BranchSection>,
+    config: &Config,
+    max_iterations: Option<u32>,
+    no_sandbox: bool,
+    provider_override: Option<&str>,
+    gh_available: bool,
+) -> Result<Vec<BranchResult>> {
+    use tokio::task::JoinSet;
+
+    let mut join_set = JoinSet::new();
+
+    for branch in branches {
+        let project_dir = project_dir.to_path_buf();
+        let config = config.clone();
+        let provider_override = provider_override.map(String::from);
+
+        join_set.spawn(async move {
+            info!("Building branch '{}' in parallel...", branch.name);
+            build_single_branch(
+                &project_dir,
+                &branch,
+                &config,
+                max_iterations,
+                no_sandbox,
+                provider_override.as_deref(),
+                gh_available,
+            )
+            .await
+        });
+    }
+
+    let mut results = Vec::new();
+    while let Some(result) = join_set.join_next().await {
+        match result {
+            Ok(branch_result) => results.push(branch_result),
+            Err(e) => {
+                warn!("Branch task panicked: {}", e);
+            }
+        }
+    }
+
+    Ok(results)
+}
+
+/// Build a single branch in its worktree.
+async fn build_single_branch(
+    project_dir: &Path,
+    branch: &BranchSection,
+    config: &Config,
+    max_iterations: Option<u32>,
+    no_sandbox: bool,
+    provider_override: Option<&str>,
+    gh_available: bool,
+) -> BranchResult {
+    let wt_path = worktree_path(project_dir, &branch.name);
+
+    // Run the loop in the worktree directory
+    match run_branch_loop(
+        &wt_path,
+        config,
+        max_iterations,
+        no_sandbox,
+        provider_override,
+    )
+    .await
+    {
+        Ok(iterations) => {
+            // Try to create PR if enabled
+            let pr_url = if gh_available {
+                match create_pull_request(
+                    &wt_path,
+                    &branch.name,
+                    &config.git.pr_base,
+                    &format!("{}: {}", branch.name, branch.goal),
+                    &format!(
+                        "## Summary\n\n{}\n\n## Branch\n\n`{}`\n\n---\n\n🤖 Generated by Ralph",
+                        branch.goal, branch.name
+                    ),
+                )
+                .await
+                {
+                    Ok(url) => Some(url),
+                    Err(e) => {
+                        warn!("Failed to create PR for '{}': {}", branch.name, e);
+                        None
+                    }
+                }
+            } else {
+                None
+            };
+
+            BranchResult::success(&branch.name, iterations, pr_url)
+        }
+        Err(e) => BranchResult::failure(&branch.name, 0, e.to_string()),
+    }
+}
+
+/// Run the loop for a single branch (simplified version of the main loop).
+#[allow(clippy::too_many_lines, tail_expr_drop_order)]
+async fn run_branch_loop(
+    wt_path: &Path,
+    config: &Config,
+    max_iterations: Option<u32>,
+    no_sandbox: bool,
+    provider_override: Option<&str>,
+) -> Result<u32> {
+    use crate::detection::{get_commit_hash, CompletionDetector};
+
+    // Determine prompt file
+    let prompt_file = wt_path.join("PROMPT_build.md");
+    if !prompt_file.exists() {
+        bail!(
+            "Prompt file not found in worktree: {}",
+            prompt_file.display()
+        );
+    }
+
+    // Load or create state for this worktree
+    let mut state = RalphState::load_or_create(wt_path, Mode::Build)?;
+    state.max_iterations = max_iterations;
+    state.active = true;
+    state.save(wt_path)?;
+
+    // Get agent provider
+    let provider = resolve_provider(config, provider_override)?;
+
+    // Create agent
+    let agent: Box<dyn AgentProvider> = match provider {
+        Provider::Cursor => Box::new(CursorProvider::new(config.agent.cursor.clone())),
+        Provider::Claude => Box::new(ClaudeProvider::new(config.agent.claude.clone())),
+    };
+
+    // Create sandbox if enabled
+    let sandbox: Option<Box<dyn Sandbox>> = if !no_sandbox && config.sandbox.enabled {
+        Some(Box::new(DockerSandbox::new(
+            config.clone(),
+            provider,
+            config.agent.clone(),
+        )))
+    } else {
+        None
+    };
+
+    // Initialize completion detector
+    let mut detector = CompletionDetector::from_state(
+        config.completion.idle_threshold,
+        state.last_commit.clone(),
+        state.idle_iterations,
+    );
+
+    // Main loop for this branch
+    loop {
+        // Check for cancellation
+        if let Some(loaded) = RalphState::load(wt_path)? {
+            if !loaded.active {
+                state.active = false;
+                state.save(wt_path)?;
+                break;
+            }
+        }
+
+        // Check max iterations
+        if state
+            .max_iterations
+            .is_some_and(|max| state.iteration > max)
+        {
+            state.active = false;
+            state.save(wt_path)?;
+            break;
+        }
+
+        // Record commit hash at start
+        let start_commit = get_commit_hash(wt_path).await;
+        detector.record_commit(start_commit);
+
+        // Read prompt
+        let mut prompt = std::fs::read_to_string(&prompt_file)
+            .with_context(|| format!("Failed to read prompt file: {}", prompt_file.display()))?;
+
+        // Append validation errors if present
+        if let Some(ref last_error) = state.last_error {
+            if last_error.starts_with("Validation error:") {
+                let error_details = last_error
+                    .strip_prefix("Validation error:")
+                    .unwrap_or(last_error);
+                prompt.push_str("\n\n## ⚠️ VALIDATION ERROR FROM PREVIOUS ITERATION\n");
+                prompt.push_str("The following validation error occurred. Please fix it:\n\n```\n");
+                prompt.push_str(error_details.trim());
+                prompt.push_str("\n```\n\nFix the issues above and ensure validation passes.\n");
+            }
+        }
+
+        // Run agent
+        let output_result = if let Some(ref sb) = sandbox {
+            sb.run(wt_path, &prompt, None).await
+        } else {
+            let timeout_mins = resolve_timeout(config, provider);
+            let timeout_duration = std::time::Duration::from_secs(u64::from(timeout_mins) * 60);
+            tokio::time::timeout(timeout_duration, agent.invoke(wt_path, &prompt))
+                .await
+                .unwrap_or_else(|_| {
+                    Err(anyhow::anyhow!(
+                        "Agent execution timed out after {timeout_mins} minutes"
+                    ))
+                })
+        };
+
+        // Handle result
+        match output_result {
+            Ok(_) => {
+                state.consecutive_errors = 0;
+            }
+            Err(e) => {
+                let error_msg = e.to_string();
+                let is_recoverable = error_msg.contains("timed out")
+                    || error_msg.contains("rate limit")
+                    || error_msg.contains("resource_exhausted");
+
+                if is_recoverable {
+                    state.error_count += 1;
+                    state.consecutive_errors += 1;
+                    state.last_error = Some(error_msg);
+                    state.iteration += 1;
+                    state.save(wt_path)?;
+
+                    if config.monitoring.max_consecutive_errors > 0
+                        && state.consecutive_errors >= config.monitoring.max_consecutive_errors
+                    {
+                        state.active = false;
+                        state.save(wt_path)?;
+                        bail!("Circuit breaker triggered");
+                    }
+                    continue;
+                }
+                return Err(e);
+            }
+        }
+
+        // Validate if enabled
+        if config.validation.enabled {
+            if let Err(validation_error) = validate_code(wt_path, &config.validation.command).await
+            {
+                state.error_count += 1;
+                state.consecutive_errors += 1;
+                state.last_error = Some(format!("Validation error:{validation_error}"));
+                state.iteration += 1;
+                state.save(wt_path)?;
+
+                if config.monitoring.max_consecutive_errors > 0
+                    && state.consecutive_errors >= config.monitoring.max_consecutive_errors
+                {
+                    state.active = false;
+                    state.save(wt_path)?;
+                    bail!("Circuit breaker triggered");
+                }
+                continue;
+            }
+            // Clear validation error on success
+            if state
+                .last_error
+                .as_ref()
+                .is_some_and(|e| e.starts_with("Validation error:"))
+            {
+                state.last_error = None;
+            }
+        }
+
+        state.last_iteration_at = Some(chrono::Utc::now());
+        state.save(wt_path)?;
+
+        // Check completion (idle detection)
+        let current_commit = get_commit_hash(wt_path).await;
+        let is_complete = detector.check_completion(current_commit.as_deref());
+
+        state.last_commit = detector.last_commit().map(String::from);
+        state.idle_iterations = detector.idle_count();
+
+        if is_complete {
+            state.active = false;
+            state.save(wt_path)?;
+            break;
+        }
+
+        // Git push if enabled
+        if config.git.auto_push {
+            if let Err(e) = git_push(wt_path, &config.git.protected_branches).await {
+                warn!("Git push failed in worktree: {}", e);
+            }
+        }
+
+        state.iteration += 1;
+        state.save(wt_path)?;
+    }
+
+    Ok(state.iteration)
+}
+
+/// Format a summary of branch build results.
+fn format_branch_summary(results: &[BranchResult]) -> String {
+    use std::fmt::Write;
+
+    let mut out = String::new();
+    writeln!(
+        out,
+        "\n═══════════════════════════════════════════════════════════════"
+    )
+    .unwrap();
+    writeln!(out, "  Branch Build Summary").unwrap();
+    writeln!(
+        out,
+        "═══════════════════════════════════════════════════════════════"
+    )
+    .unwrap();
+
+    let succeeded: Vec<_> = results.iter().filter(|r| r.success).collect();
+    let failed: Vec<_> = results.iter().filter(|r| !r.success).collect();
+
+    writeln!(
+        out,
+        "\n  ✅ Succeeded: {}  ❌ Failed: {}",
+        succeeded.len(),
+        failed.len()
+    )
+    .unwrap();
+
+    if !succeeded.is_empty() {
+        writeln!(out, "\n  Successful branches:").unwrap();
+        for r in &succeeded {
+            let pr_info = r
+                .pr_url
+                .as_ref()
+                .map(|url| format!(" → {url}"))
+                .unwrap_or_default();
+            writeln!(
+                out,
+                "    ✓ {} ({} iterations){pr_info}",
+                r.branch, r.iterations
+            )
+            .unwrap();
+        }
+    }
+
+    if !failed.is_empty() {
+        writeln!(out, "\n  Failed branches:").unwrap();
+        for r in &failed {
+            let error = r.error.as_deref().unwrap_or("Unknown error");
+            writeln!(out, "    ✗ {}: {}", r.branch, error).unwrap();
+        }
+    }
+
+    writeln!(
+        out,
+        "\n═══════════════════════════════════════════════════════════════"
+    )
+    .unwrap();
+    out
+}
+
+// -----------------------------------------------------------------------------
 // Public API
 // -----------------------------------------------------------------------------
 
@@ -311,11 +846,65 @@ pub(crate) async fn run(
     no_sandbox: bool,
     custom_prompt: Option<String>,
     provider_override: Option<String>,
+    sequential: bool,
 ) -> Result<()> {
     let cwd = std::env::current_dir().context("Failed to get current directory")?;
 
     // Load configuration
     let config = Config::load(&cwd).context("Failed to load ralph.toml")?;
+
+    // Check for branch build mode: build mode + IMPLEMENTATION_PLAN.md with branches
+    if mode == LoopMode::Build && custom_prompt.is_none() {
+        let plan_path = cwd.join("IMPLEMENTATION_PLAN.md");
+        if plan_path.exists() {
+            let plan_content = std::fs::read_to_string(&plan_path)
+                .context("Failed to read IMPLEMENTATION_PLAN.md")?;
+            let branches = parse_implementation_plan(&plan_content);
+
+            // Filter to only incomplete branches (those with unchecked tasks)
+            let incomplete_branches: Vec<_> = branches
+                .into_iter()
+                .filter(|b| {
+                    // Check if branch section has unchecked tasks
+                    // A branch is complete if all its tasks are checked [x]
+                    is_branch_incomplete(&plan_content, &b.name)
+                })
+                .collect();
+
+            if !incomplete_branches.is_empty() {
+                info!(
+                    "Found {} incomplete branches in IMPLEMENTATION_PLAN.md",
+                    incomplete_branches.len()
+                );
+                let mode_str = if sequential { "sequential" } else { "parallel" };
+                println!(
+                    "Building {} branches in {} mode...\n",
+                    incomplete_branches.len(),
+                    mode_str
+                );
+
+                let results = execute_branch_builds(
+                    incomplete_branches,
+                    &config,
+                    max_iterations,
+                    no_sandbox,
+                    provider_override.as_deref(),
+                    sequential,
+                )
+                .await?;
+
+                print!("{}", format_branch_summary(&results));
+
+                // Return error if any branch failed
+                let failed_count = results.iter().filter(|r| !r.success).count();
+                if failed_count > 0 {
+                    bail!("{failed_count} branch(es) failed");
+                }
+
+                return Ok(());
+            }
+        }
+    }
 
     // Determine prompt file
     let prompt_file = determine_prompt_file(&cwd, mode, custom_prompt.as_deref());
@@ -1256,6 +1845,134 @@ timeout_minutes = 60
         let config = Config::default();
         assert_eq!(resolve_timeout(&config, Provider::Cursor), 60);
         assert_eq!(resolve_timeout(&config, Provider::Claude), 60);
+    }
+
+    // -------------------------------------------------------------------------
+    // Branch Build Tests
+    // -------------------------------------------------------------------------
+
+    #[test]
+    fn test_is_branch_incomplete_with_unchecked_tasks() {
+        let plan = r"
+## Branch: feature-a
+Goal: Add feature A
+Base: master
+
+- [ ] Task 1
+- [ ] Task 2
+";
+        assert!(is_branch_incomplete(plan, "feature-a"));
+    }
+
+    #[test]
+    fn test_is_branch_incomplete_with_all_checked_tasks() {
+        let plan = r"
+## Branch: feature-a
+Goal: Add feature A
+Base: master
+
+- [x] Task 1
+- [x] Task 2
+";
+        assert!(!is_branch_incomplete(plan, "feature-a"));
+    }
+
+    #[test]
+    fn test_is_branch_incomplete_with_mixed_tasks() {
+        let plan = r"
+## Branch: feature-a
+Goal: Add feature A
+Base: master
+
+- [x] Task 1
+- [ ] Task 2
+";
+        assert!(is_branch_incomplete(plan, "feature-a"));
+    }
+
+    #[test]
+    fn test_is_branch_incomplete_branch_not_found() {
+        let plan = r"
+## Branch: other-branch
+Goal: Other
+Base: master
+";
+        assert!(!is_branch_incomplete(plan, "feature-a"));
+    }
+
+    #[test]
+    fn test_is_branch_incomplete_scoped_to_branch() {
+        // Ensure we only check tasks within the branch's section
+        let plan = r"
+## Branch: feature-a
+Goal: Add feature A
+Base: master
+
+- [x] Task 1
+- [x] Task 2
+
+## Branch: feature-b
+Goal: Add feature B
+Base: master
+
+- [ ] Task 3
+";
+        // feature-a should be complete (all tasks checked)
+        assert!(!is_branch_incomplete(plan, "feature-a"));
+        // feature-b should be incomplete
+        assert!(is_branch_incomplete(plan, "feature-b"));
+    }
+
+    #[test]
+    fn test_branch_result_success() {
+        let result = BranchResult::success(
+            "test-branch",
+            5,
+            Some("http://example.com/pr/1".to_string()),
+        );
+        assert!(result.success);
+        assert_eq!(result.branch, "test-branch");
+        assert_eq!(result.iterations, 5);
+        assert!(result.error.is_none());
+        assert_eq!(result.pr_url, Some("http://example.com/pr/1".to_string()));
+    }
+
+    #[test]
+    fn test_branch_result_failure() {
+        let result = BranchResult::failure("test-branch", 3, "Something went wrong".to_string());
+        assert!(!result.success);
+        assert_eq!(result.branch, "test-branch");
+        assert_eq!(result.iterations, 3);
+        assert_eq!(result.error, Some("Something went wrong".to_string()));
+        assert!(result.pr_url.is_none());
+    }
+
+    #[test]
+    fn test_format_branch_summary_all_success() {
+        let results = vec![
+            BranchResult::success("branch-a", 5, Some("http://pr/1".to_string())),
+            BranchResult::success("branch-b", 3, None),
+        ];
+        let summary = format_branch_summary(&results);
+        assert!(summary.contains("Succeeded: 2"));
+        assert!(summary.contains("Failed: 0"));
+        assert!(summary.contains("branch-a"));
+        assert!(summary.contains("branch-b"));
+        assert!(summary.contains("http://pr/1"));
+    }
+
+    #[test]
+    fn test_format_branch_summary_mixed() {
+        let results = vec![
+            BranchResult::success("branch-a", 5, None),
+            BranchResult::failure("branch-b", 3, "Build failed".to_string()),
+        ];
+        let summary = format_branch_summary(&results);
+        assert!(summary.contains("Succeeded: 1"));
+        assert!(summary.contains("Failed: 1"));
+        assert!(summary.contains("branch-a"));
+        assert!(summary.contains("branch-b"));
+        assert!(summary.contains("Build failed"));
     }
 
     // -------------------------------------------------------------------------

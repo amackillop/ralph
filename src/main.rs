@@ -155,6 +155,10 @@ enum Commands {
         /// Override agent provider (cursor or claude)
         #[arg(long)]
         provider: Option<String>,
+
+        /// Build branches sequentially instead of in parallel (build mode only)
+        #[arg(long)]
+        sequential: bool,
     },
 
     /// Show current Ralph loop status
@@ -211,6 +215,7 @@ async fn main() -> Result<()> {
             no_sandbox,
             prompt,
             provider,
+            sequential,
         } => {
             // Load config to get log file settings
             let cwd = std::env::current_dir().context("Failed to get current directory")?;
@@ -231,7 +236,15 @@ async fn main() -> Result<()> {
                 })
             };
 
-            commands::loop_cmd::run(mode, effective_max, no_sandbox, prompt, provider).await?;
+            commands::loop_cmd::run(
+                mode,
+                effective_max,
+                no_sandbox,
+                prompt,
+                provider,
+                sequential,
+            )
+            .await?;
         }
         Commands::Status => {
             commands::status::run()?;
