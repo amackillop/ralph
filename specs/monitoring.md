@@ -48,12 +48,17 @@ Alert on completion or error:
 ```toml
 [monitoring]
 log_file = ".ralph/loop.log"
-log_format = "json"
+log_format = "json"              # Options: "json", "text"
+log_rotation = "daily"           # Options: "daily" (default), "hourly", "never"
 show_progress = true
 
+# Circuit breaker: stop loop after N consecutive errors
+# Set to 0 to disable and continue indefinitely
+max_consecutive_errors = 5       # Default: 5
+
 [monitoring.notifications]
-on_complete = "https://hooks.example.com/ralph"
-on_error = "desktop"  # "webhook:<url>", "desktop", "sound", "none"
+on_complete = "https://hooks.example.com/ralph"  # Webhook URL
+on_error = "desktop"             # Options: "webhook:<url>", "desktop", "sound", "none"
 ```
 
 ## Acceptance Criteria

@@ -79,8 +79,8 @@ pub(crate) async fn get_last_commit_message(cwd: &Path) -> Option<String> {
 
 /// Count successful commits since loop started (commits with timestamps after `started_at`).
 pub(crate) async fn count_successful_commits(cwd: &Path, started_at: DateTime<Utc>) -> u32 {
-    // Get all commits since started_at using ISO format
-    let since_str = started_at.format("%Y-%m-%d %H:%M:%S").to_string();
+    // Format with explicit UTC timezone so git interprets it correctly regardless of local timezone
+    let since_str = started_at.format("%Y-%m-%dT%H:%M:%SZ").to_string();
     let output = match tokio::process::Command::new("git")
         .current_dir(cwd)
         .args(["log", "--since", &since_str, "--pretty=format:%H"])

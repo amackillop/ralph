@@ -20,6 +20,10 @@ path = "agent"
 # Output format for non-interactive mode
 output_format = "text"
 
+# Sandbox mode for cursor-agent (required for autonomous validation)
+# Options: "disabled" (default), "enabled"
+sandbox = "disabled"
+
 # Claude Code CLI configuration
 # See: https://docs.anthropic.com/en/docs/claude-code
 [agent.claude]
@@ -59,6 +63,15 @@ use_local_image = true
 #     { host = "~/.npm", container = "/root/.npm", readonly = false },
 # ]
 
+# Credential auto-mounts (defaults shown, set to [] to disable)
+# credential_mounts = [
+#     { host = "~/.ssh", container = "/root/.ssh", readonly = true },
+#     { host = "~/.gitconfig", container = "/root/.gitconfig", readonly = true },
+#     { host = "~/.npmrc", container = "/root/.npmrc", readonly = true },
+#     { host = "~/.cargo/credentials.toml", container = "/root/.cargo/credentials.toml", readonly = true },
+#     { host = "~/.pypirc", container = "/root/.pypirc", readonly = true },
+# ]
+
 [sandbox.network]
 # Network policy: "allow-all", "allowlist", "deny"
 # Default: allow-all for ease of use; tighten per-project as needed
@@ -92,8 +105,27 @@ auto_push = true
 protected_branches = ["main", "master", "production"]
 
 [completion]
-# Default completion promise format
-promise_format = "<promise>{}</promise>"
+# Number of consecutive idle iterations before stopping.
+# An iteration is "idle" if validation passes but no new commits are created.
+# Default: 2
+idle_threshold = 2
+
+[monitoring]
+# Log file location
+log_file = ".ralph/loop.log"
+# Log format: "json" or "text"
+log_format = "json"
+# Log rotation: "daily" (default), "hourly", "never"
+log_rotation = "daily"
+# Show progress during loop execution
+show_progress = true
+# Circuit breaker: stop after N consecutive errors (0 = disabled)
+max_consecutive_errors = 5
+
+# Notification configuration
+# [monitoring.notifications]
+# on_complete = "https://hooks.example.com/ralph"  # Webhook URL
+# on_error = "desktop"  # Options: "webhook:<url>", "desktop", "sound", "none"
 
 [validation]
 # Enable code validation after each iteration

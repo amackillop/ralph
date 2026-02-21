@@ -12,12 +12,13 @@ provider = "cursor"
 
 [agent.cursor]
 path = "agent"           # "cursor-agent" on NixOS
-output_format = "text"
+model = "auto"           # Optional: "auto", "claude-sonnet-4-20250514", etc.
+output_format = "text"   # Options: "text", "json", "stream-json"
 sandbox = "disabled"     # Required for shell access
 timeout_minutes = 60     # Optional: override sandbox timeout for Cursor
 ```
 
-Invocation: `agent -p "prompt" --sandbox disabled --output-format text`
+Invocation: `agent -p "prompt" --sandbox disabled --output-format text --model <model>`
 
 Note: Cursor CLI takes prompt as `-p` argument.
 
@@ -29,9 +30,9 @@ provider = "claude"
 
 [agent.claude]
 path = "claude"
-model = "opus"           # Recommended for primary agent
+model = "opus"           # Default: "opus". Options: "opus", "sonnet"
 skip_permissions = true  # Required for autonomous operation
-output_format = "text"
+output_format = "text"   # Options: "text", "json", "stream-json"
 timeout_minutes = 120    # Optional: override sandbox timeout for Claude
 verbose = false          # Optional: enable verbose output
 ```

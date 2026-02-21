@@ -305,14 +305,31 @@ async fn pull_image(image: &str, use_local_image: bool, force: bool) -> Result<(
 }
 
 /// Show Docker image status and information.
+///
+/// Shows config info first, then attempts to query Docker for details.
+/// Succeeds even if Docker is unavailable (graceful degradation).
 async fn show_image_status(image: &str) -> Result<()> {
-    let docker = Docker::connect_with_local_defaults()
-        .context("Failed to connect to Docker. Is Docker running?")?;
+    // Always show configured image name
+    println!("Image: {image}");
 
-    docker
-        .ping()
-        .await
-        .context("Cannot ping Docker daemon. Is Docker running?")?;
+    // Try to connect to Docker
+    let docker = match Docker::connect_with_local_defaults() {
+        Ok(d) => d,
+        Err(e) => {
+            println!("Status: Unknown (Docker not available)");
+            println!("\nNote: {e}");
+            println!("\nTo check status, ensure Docker is running.");
+            return Ok(());
+        }
+    };
+
+    // Try to ping Docker daemon
+    if let Err(e) = docker.ping().await {
+        println!("Status: Unknown (Docker daemon not responding)");
+        println!("\nNote: {e}");
+        println!("\nTo check status, ensure Docker daemon is running.");
+        return Ok(());
+    }
 
     // List all images and find matching ones
     let images = docker
@@ -341,7 +358,7 @@ async fn show_image_status(image: &str) -> Result<()> {
         .collect();
 
     if matching_images.is_empty() {
-        println!("Image not found: {image}");
+        println!("Status: Not found");
         println!("\nTo build the image, run:");
         println!("  ralph image build");
         println!("\nTo pull the image, run:");
@@ -349,7 +366,6 @@ async fn show_image_status(image: &str) -> Result<()> {
         return Ok(());
     }
 
-    println!("Image: {image}");
     println!("Status: Found");
 
     for img in matching_images {

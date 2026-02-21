@@ -22,25 +22,33 @@ Each iteration:
 
 Loop terminates when:
 - Max iterations reached (`--max`)
-- Completion promise detected in output (`--promise`)
+- Idle detection: N consecutive iterations without git changes (configurable via `idle_threshold`, default 2)
+- Circuit breaker: N consecutive errors (configurable via `max_consecutive_errors`, default 3)
 - User cancellation (`ralph cancel` or Ctrl+C)
 
 ## State Persistence
 
 State stored in `.ralph/state.toml`:
-- Current iteration count
-- Mode (plan/build)
-- Start time
-- Error count and last error
-- Completion promise (if set)
+- `active`: Whether loop is currently running
+- `iteration`: Current iteration count
+- `mode`: Loop mode (plan/build)
+- `started_at`: Start timestamp
+- `last_iteration_at`: Last iteration timestamp
+- `max_iterations`: Iteration limit (if set)
+- `error_count`: Total errors encountered
+- `consecutive_errors`: Current consecutive error streak
+- `last_error`: Most recent error message
+- `last_commit`: Last recorded git commit hash (for idle detection)
+- `idle_iterations`: Consecutive iterations without git changes
 
 State survives restarts — `ralph loop` resumes from last iteration.
 
 ## Error Recovery
 
-- Validation failures: Append error to next iteration's prompt
-- Agent timeouts: Increment iteration, continue
-- Rate limits: Exponential backoff, continue
+- Validation failures: Append error to next iteration's prompt, reset consecutive error count
+- Agent timeouts: Increment iteration, increment consecutive errors, continue
+- Rate limits: Exponential backoff (2^n seconds, capped at 60s), continue
+- Circuit breaker: After `max_consecutive_errors` consecutive failures, stop loop
 - Other errors: Stop loop, report error
 
 ## Acceptance Criteria

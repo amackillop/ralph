@@ -63,8 +63,10 @@ pub(crate) struct LoopResult {
 pub(crate) enum TerminationReason {
     /// Max iterations reached.
     MaxIterations,
-    /// Completion promise detected.
+    /// Completion detected (idle threshold).
     CompletionDetected,
+    /// Loop was cancelled externally.
+    Cancelled,
     /// Fatal error occurred.
     Error(String),
 }
@@ -111,6 +113,16 @@ pub(crate) async fn run_loop_core(
 
     // Main loop
     loop {
+        // Check for external cancellation (e.g., `ralph cancel`)
+        if let Some(loaded) = RalphState::load(&project_dir)? {
+            if !loaded.active {
+                state.active = false;
+                state.save(&project_dir)?;
+                termination_reason = TerminationReason::Cancelled;
+                break;
+            }
+        }
+
         // Check max iterations
         if is_max_iterations_reached(&state) {
             state.active = false;
@@ -151,7 +163,7 @@ pub(crate) async fn run_loop_core(
         };
 
         // Handle agent execution result
-        let output = match output_result {
+        let _output = match output_result {
             Ok(out) => out,
             Err(e) => {
                 let error_msg = e.to_string();
@@ -233,6 +245,17 @@ pub(crate) async fn run_loop_core(
         // Successful iteration
         state.consecutive_errors = 0;
         state.last_iteration_at = Some(chrono::Utc::now());
+
+        // Check for cancellation again (agent may have been cancelled externally during execution)
+        if let Some(loaded) = RalphState::load(&project_dir)? {
+            if !loaded.active {
+                state.active = false;
+                state.save(&project_dir)?;
+                termination_reason = TerminationReason::Cancelled;
+                break;
+            }
+        }
+
         state.save(&project_dir)?;
 
         // Check for completion (idle detection - no real git in tests, so always idle)
@@ -366,6 +389,27 @@ pub(crate) async fn run(
 
     // Main loop
     loop {
+        // Check for external cancellation (e.g., `ralph cancel`)
+        if let Some(loaded) = RalphState::load(&cwd)? {
+            if !loaded.active {
+                info!("Loop cancelled externally");
+                state.active = false;
+                state.save(&cwd)?;
+
+                tracing::info!(
+                    event = "loop_end",
+                    total_iterations = state.iteration,
+                    reason = "cancelled",
+                );
+
+                let details =
+                    NotificationDetails::complete(state.iteration, state.iteration, "cancelled");
+                notifier.notify(NotificationEvent::Complete, &details).await;
+
+                break;
+            }
+        }
+
         // Check max iterations
         if is_max_iterations_reached(&state) {
             println!(
@@ -668,6 +712,28 @@ pub(crate) async fn run(
         // Successful iteration - reset consecutive errors counter
         state.consecutive_errors = 0;
         state.last_iteration_at = Some(chrono::Utc::now());
+
+        // Check for cancellation again (loop may have been cancelled during agent execution)
+        if let Some(loaded) = RalphState::load(&cwd)? {
+            if !loaded.active {
+                info!("Loop cancelled externally during iteration");
+                state.active = false;
+                state.save(&cwd)?;
+
+                tracing::info!(
+                    event = "loop_end",
+                    total_iterations = state.iteration,
+                    reason = "cancelled",
+                );
+
+                let details =
+                    NotificationDetails::complete(state.iteration, state.iteration, "cancelled");
+                notifier.notify(NotificationEvent::Complete, &details).await;
+
+                break;
+            }
+        }
+
         state.save(&cwd)?;
 
         // Get commit hash after agent execution (may have created commits)
@@ -688,11 +754,8 @@ pub(crate) async fn run(
             );
 
             // Send completion notification
-            let details = NotificationDetails::complete(
-                state.iteration,
-                state.iteration,
-                "agent_idle",
-            );
+            let details =
+                NotificationDetails::complete(state.iteration, state.iteration, "agent_idle");
             notifier.notify(NotificationEvent::Complete, &details).await;
 
             break;
@@ -1460,6 +1523,42 @@ timeout_minutes = 60
                 TerminationReason::CompletionDetected
             );
             assert_eq!(result.error_count, 1); // One rate limit error
+        }
+
+        #[tokio::test]
+        async fn test_e2e_loop_external_cancellation() {
+            // Test: Loop stops when state.active is set to false externally during execution
+            let (_dir, project_dir) = setup_test_project("Test prompt");
+            let prompt_file = project_dir.join("PROMPT_build.md");
+
+            // Agent that cancels the loop after first invocation
+            let agent = MockAgentProvider::new(vec![
+                // First call succeeds but cancels the loop (simulates `ralph cancel`)
+                MockResponse::SuccessAndCancel("Working...".to_string(), project_dir.clone()),
+                // Second call would succeed, but loop should have stopped
+                MockResponse::Success("Should not reach here".to_string()),
+            ]);
+
+            // High thresholds so cancellation is the only way to stop
+            let mut config = test_config();
+            config.completion.idle_threshold = 100;
+
+            let deps = LoopDependencies {
+                agent: Box::new(agent.clone()),
+                sandbox: None,
+                config,
+                project_dir: project_dir.clone(),
+                prompt_file,
+            };
+
+            let state = test_state(Some(100)); // High max iterations
+
+            // Run the loop - first iteration runs, then cancellation is detected
+            let result = run_loop_core(deps, state).await.unwrap();
+
+            assert_eq!(result.termination_reason, TerminationReason::Cancelled);
+            // Only one iteration should have run before cancellation was detected
+            assert_eq!(agent.invocation_count(), 1);
         }
     }
 }

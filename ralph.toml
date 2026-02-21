@@ -193,15 +193,10 @@ protected_branches = [
 # Controls how Ralph detects when the task is complete.
 
 [completion]
-# Format for the completion promise tag
-# The {} is replaced with the promise text from --completion-promise
-# When the AI outputs this tag, Ralph stops the loop
-# Default: "<promise>{}</promise>"
-#
-# Example: With promise_format = "<promise>{}</promise>" and
-#          --completion-promise "All tests passing"
-#          Ralph looks for: <promise>All tests passing</promise>
-promise_format = "<promise>{}</promise>"
+# Number of consecutive idle iterations before stopping.
+# An iteration is "idle" if validation passes but no new commits are created.
+# Default: 2
+idle_threshold = 2
 
 
 # ============================================================================
