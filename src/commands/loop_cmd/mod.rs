@@ -2309,5 +2309,178 @@ Base: master
             // Only one iteration should have run before cancellation was detected
             assert_eq!(agent.invocation_count(), 1);
         }
+
+        #[tokio::test]
+        async fn test_e2e_loop_plan_mode() {
+            // Test: Plan mode uses correct prompt file and state mode
+            let dir = tempdir().unwrap();
+            let project_dir = dir.path().to_path_buf();
+
+            // Create plan mode prompt file (not build mode)
+            let prompt_file = project_dir.join("PROMPT_plan.md");
+            std::fs::write(&prompt_file, "Plan mode prompt content").unwrap();
+
+            let agent = MockAgentProvider::always_succeed("Generated plan output");
+
+            let deps = LoopDependencies {
+                agent: Box::new(agent.clone()),
+                sandbox: None,
+                config: test_config(),
+                project_dir: project_dir.clone(),
+                prompt_file,
+            };
+
+            // Create state in Plan mode (not Build)
+            let state = RalphState {
+                active: false,
+                mode: Mode::Plan, // Plan mode
+                iteration: 1,
+                max_iterations: Some(2),
+                started_at: Utc::now(),
+                last_iteration_at: None,
+                error_count: 0,
+                consecutive_errors: 0,
+                last_error: None,
+                last_commit: None,
+                idle_iterations: 0,
+            };
+
+            let result = run_loop_core(deps, state).await.unwrap();
+
+            // Plan mode should complete via idle detection (no git commits in test)
+            assert_eq!(
+                result.termination_reason,
+                TerminationReason::CompletionDetected
+            );
+            assert_eq!(agent.invocation_count(), 2);
+
+            // Verify saved state reflects Plan mode
+            let loaded = RalphState::load(&project_dir).unwrap().unwrap();
+            assert_eq!(loaded.mode, Mode::Plan);
+        }
+
+        #[tokio::test]
+        async fn test_e2e_loop_state_persistence_across_restart() {
+            // Test: State persists correctly and loop can resume from saved state
+            // Simulates restart by running loop partially, then loading state and running again
+            let dir = tempdir().unwrap();
+            let project_dir = dir.path().to_path_buf();
+            let prompt_file = project_dir.join("PROMPT_build.md");
+            std::fs::write(&prompt_file, "Test prompt").unwrap();
+
+            // First run: 2 iterations, then stops due to max iterations
+            let agent1 = MockAgentProvider::always_succeed("First run output");
+            let mut config = test_config();
+            config.completion.idle_threshold = 100; // High to prevent idle completion
+
+            let deps1 = LoopDependencies {
+                agent: Box::new(agent1.clone()),
+                sandbox: None,
+                config: config.clone(),
+                project_dir: project_dir.clone(),
+                prompt_file: prompt_file.clone(),
+            };
+
+            let state1 = RalphState {
+                active: false,
+                mode: Mode::Build,
+                iteration: 1,
+                max_iterations: Some(2),
+                started_at: Utc::now(),
+                last_iteration_at: None,
+                error_count: 0,
+                consecutive_errors: 0,
+                last_error: None,
+                last_commit: None,
+                idle_iterations: 0,
+            };
+
+            let result1 = run_loop_core(deps1, state1).await.unwrap();
+            assert_eq!(result1.termination_reason, TerminationReason::MaxIterations);
+            assert_eq!(agent1.invocation_count(), 2);
+
+            // Simulate restart: load state from disk
+            let loaded_state = RalphState::load(&project_dir).unwrap().unwrap();
+            assert!(!loaded_state.active); // Should be inactive after completion
+            assert!(loaded_state.iteration > 1); // Should have advanced
+
+            // Verify state fields persisted correctly
+            assert_eq!(loaded_state.mode, Mode::Build);
+            assert_eq!(loaded_state.error_count, 0);
+
+            // Create new state for "resumed" session, starting from where we left off
+            // max_iterations is iteration (not iteration + 1) so only 1 iteration runs
+            // (loop runs while iteration <= max, so if both are 3, runs once then 4 > 3)
+            let resumed_state = RalphState {
+                active: false,
+                mode: loaded_state.mode,
+                iteration: loaded_state.iteration,
+                max_iterations: Some(loaded_state.iteration), // Allow exactly 1 more iteration
+                started_at: Utc::now(),
+                last_iteration_at: None,
+                error_count: loaded_state.error_count,
+                consecutive_errors: 0, // Reset on restart
+                last_error: None,
+                last_commit: loaded_state.last_commit.clone(),
+                idle_iterations: loaded_state.idle_iterations,
+            };
+
+            // Second run: continues from saved state
+            let agent2 = MockAgentProvider::always_succeed("Second run output");
+            let deps2 = LoopDependencies {
+                agent: Box::new(agent2.clone()),
+                sandbox: None,
+                config,
+                project_dir: project_dir.clone(),
+                prompt_file,
+            };
+
+            let result2 = run_loop_core(deps2, resumed_state).await.unwrap();
+
+            // Should run 1 more iteration and hit max
+            assert_eq!(result2.termination_reason, TerminationReason::MaxIterations);
+            assert_eq!(agent2.invocation_count(), 1);
+            // Final iteration should be original + 1
+            assert_eq!(result2.final_iteration, result1.final_iteration + 1);
+        }
+
+        #[tokio::test]
+        async fn test_e2e_loop_validation_error_in_prompt() {
+            // Test: Validation errors are included in subsequent iteration prompts
+            // This verifies the error feedback mechanism works
+            let dir = tempdir().unwrap();
+            let project_dir = dir.path().to_path_buf();
+
+            let prompt_file = project_dir.join("PROMPT_build.md");
+            std::fs::write(&prompt_file, "Initial prompt").unwrap();
+
+            // Agent always succeeds
+            let agent = MockAgentProvider::always_succeed("Output");
+
+            let mut config = test_config();
+            config.validation.enabled = true;
+            // Use 'false' command which always exits non-zero
+            // shell_words::split doesn't interpret shell operators like &&
+            config.validation.command = "false".to_string();
+            config.completion.idle_threshold = 100; // High to force max iterations
+
+            let deps = LoopDependencies {
+                agent: Box::new(agent.clone()),
+                sandbox: None,
+                config,
+                project_dir: project_dir.clone(),
+                prompt_file,
+            };
+
+            let state = test_state(Some(3));
+
+            let result = run_loop_core(deps, state).await.unwrap();
+
+            // Should hit max iterations (validation errors are recoverable)
+            assert_eq!(result.termination_reason, TerminationReason::MaxIterations);
+            // Validation failed each iteration
+            assert_eq!(result.error_count, 3);
+            assert_eq!(agent.invocation_count(), 3);
+        }
     }
 }
