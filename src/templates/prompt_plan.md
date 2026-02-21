@@ -1,10 +1,50 @@
-0a. Study `specs/*` with up to 250 parallel Sonnet subagents to learn the application specifications.
-0b. Study @IMPLEMENTATION_PLAN.md (if present) to understand the plan so far.
-0c. Study shared utilities and components with up to 250 parallel Sonnet subagents.
-0d. For reference, the application source code is in `src/*`.
+# Planning Mode
 
-1. Study @IMPLEMENTATION_PLAN.md (if present; it may be incorrect) and use up to 500 Sonnet subagents to study existing source code in `src/*` and compare it against `specs/*`. Use an Opus subagent to analyze findings, prioritize tasks, and create/update @IMPLEMENTATION_PLAN.md as a bullet point list sorted in priority of items yet to be implemented. Ultrathink. Consider searching for TODO, minimal implementations, placeholders, skipped/flaky tests, and inconsistent patterns. Study @IMPLEMENTATION_PLAN.md to determine starting point for research and keep it up to date with items considered complete/incomplete using subagents.
+Study the codebase and specs to generate a branch-structured implementation plan.
 
-IMPORTANT: Plan only. Do NOT implement anything. Do NOT assume functionality is missing; confirm with code search first. Prefer consolidated, idiomatic implementations in shared locations over ad-hoc copies.
+## Instructions
 
-ULTIMATE GOAL: We want to achieve [YOUR PROJECT GOAL HERE]. Consider missing elements and plan accordingly. If an element is missing, search first to confirm it doesn't exist, then if needed author the specification at specs/FILENAME.md. If you create a new element then document the plan to implement it in @IMPLEMENTATION_PLAN.md using a subagent.
+1. Study `specs/*` to understand requirements
+2. Study existing source code in `src/*`
+3. Compare implementation against specs to identify gaps
+4. Search for TODOs, placeholders, incomplete implementations, failing tests
+
+## Output Format
+
+Generate `IMPLEMENTATION_PLAN.md` with tasks grouped by branch:
+
+```markdown
+## Branch: <branch-name>
+Goal: <single clear goal for this branch>
+Base: master
+
+- [ ] Task 1
+- [ ] Task 2
+- [ ] Task 3
+```
+
+## Branch Guidelines
+
+- Each branch should have ONE clear goal
+- Group related tasks that should ship together
+- Keep branches small and focused (3-7 tasks typical)
+- Branch names should be kebab-case descriptive slugs
+- All branches base off master
+
+## Task Guidelines
+
+Each task = one atomic commit. Include the **why** in task descriptions:
+
+```markdown
+- [ ] Add retry logic to API client — transient failures cause cascade; 3 retries with backoff
+- [ ] Extract validation into separate module — current file is 800 lines, validation is reusable
+```
+
+The reasoning in task descriptions flows into commit messages, preserving context for future work.
+
+## Rules
+
+- Plan only. Do NOT implement anything.
+- Do NOT assume functionality is missing; confirm with code search first.
+- If specs are missing, create them at `specs/FILENAME.md` and add implementation tasks.
+- Prefer consolidated, idiomatic implementations over ad-hoc copies.

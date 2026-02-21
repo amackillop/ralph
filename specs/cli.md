@@ -23,8 +23,14 @@ ralph init --force   # Overwrite existing files
 Run the main Ralph loop:
 
 ```bash
-ralph loop plan                              # Planning mode
-ralph loop build                             # Build mode (default)
+# Plan mode - generates branch-structured IMPLEMENTATION_PLAN.md
+ralph loop plan                              # Analyze specs, generate plan
+
+# Build mode - creates worktrees and builds all branches in parallel
+ralph loop build                             # Build all branches from plan (parallel)
+ralph loop build --sequential                # Build branches one at a time
+
+# Build options
 ralph loop build -m 20                       # Limit iterations (--max-iterations)
 ralph loop build --provider claude           # Override provider
 ralph loop build --no-sandbox                # Disable sandbox
@@ -51,11 +57,12 @@ ralph revert --last 3       # Revert last 3 commits
 
 ### `ralph clean`
 
-Remove Ralph state files:
+Remove Ralph state files and worktrees:
 
 ```bash
-ralph clean        # Remove .ralph/state.toml only
-ralph clean --all  # Also remove prompt and rules files
+ralph clean                        # Remove .ralph/state.toml only
+ralph clean --all                  # Also remove prompt and rules files
+ralph clean --worktrees            # Remove all worktrees
 ```
 
 ### `ralph image <subcommand>`
