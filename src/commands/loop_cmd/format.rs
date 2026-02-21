@@ -280,6 +280,8 @@ mod tests {
             error_count: 0,
             consecutive_errors: 0,
             last_error: None,
+            last_commit: None,
+            idle_iterations: 0,
         };
         let config = Config::default();
         let prompt = std::path::PathBuf::from("/project/PROMPT_plan.md");

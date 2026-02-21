@@ -23,12 +23,29 @@ pub(crate) struct CompletionDetector {
 
 impl CompletionDetector {
     /// Create a new completion detector with the given idle threshold.
+    #[cfg(test)]
     pub fn new(idle_threshold: u32) -> Self {
         Self {
             last_commit: None,
             idle_count: 0,
             idle_threshold,
         }
+    }
+
+    /// Create a completion detector initialized from persisted state.
+    ///
+    /// Used to restore idle detection across loop restarts.
+    pub fn from_state(idle_threshold: u32, last_commit: Option<String>, idle_count: u32) -> Self {
+        Self {
+            last_commit,
+            idle_count,
+            idle_threshold,
+        }
+    }
+
+    /// Get the last known commit hash (for state persistence).
+    pub fn last_commit(&self) -> Option<&str> {
+        self.last_commit.as_deref()
     }
 
     /// Record the current commit hash at the start of an iteration.
@@ -175,5 +192,36 @@ mod tests {
 
         assert!(detector.check_completion(None));
         assert_eq!(detector.idle_count, 2);
+    }
+
+    #[test]
+    fn test_from_state_restores_idle_count() {
+        // Simulate a restart: detector was at idle_count=1, last_commit="abc123"
+        let detector =
+            CompletionDetector::from_state(DEFAULT_THRESHOLD, Some("abc123".to_string()), 1);
+
+        assert_eq!(detector.last_commit, Some("abc123".to_string()));
+        assert_eq!(detector.idle_count, 1);
+        assert_eq!(detector.idle_threshold, DEFAULT_THRESHOLD);
+    }
+
+    #[test]
+    fn test_from_state_continues_detection() {
+        // Restore state: idle_count=1, one more idle iteration should trigger completion
+        let mut detector =
+            CompletionDetector::from_state(DEFAULT_THRESHOLD, Some("abc123".to_string()), 1);
+
+        // Same commit -> should complete (idle_count becomes 2, threshold is 2)
+        assert!(detector.check_completion(Some("abc123")));
+        assert_eq!(detector.idle_count, 2);
+    }
+
+    #[test]
+    fn test_last_commit_getter() {
+        let mut detector = CompletionDetector::new(DEFAULT_THRESHOLD);
+        assert!(detector.last_commit().is_none());
+
+        detector.record_commit(Some("abc123".to_string()));
+        assert_eq!(detector.last_commit(), Some("abc123"));
     }
 }

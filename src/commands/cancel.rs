@@ -102,6 +102,8 @@ mod tests {
             error_count: 0,
             consecutive_errors: 0,
             last_error: None,
+            last_commit: None,
+            idle_iterations: 0,
         }
     }
 
@@ -142,6 +144,8 @@ mod tests {
             error_count: 0,
             consecutive_errors: 0,
             last_error: None,
+            last_commit: None,
+            idle_iterations: 0,
         };
 
         let (_, updated) = cancel_loop(Some(state.clone()));

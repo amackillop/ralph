@@ -93,7 +93,13 @@ pub(crate) async fn run_loop_core(
     state.active = true;
     state.save(&project_dir)?;
 
-    let mut detector = CompletionDetector::new(config.completion.idle_threshold);
+    // Initialize completion detector from persisted state for idle detection
+    // continuity across restarts
+    let mut detector = CompletionDetector::from_state(
+        config.completion.idle_threshold,
+        state.last_commit.clone(),
+        state.idle_iterations,
+    );
 
     // Create persistent container if sandbox is enabled and reuse is configured
     let persistent_container_name = if let Some(ref sb) = sandbox {
@@ -260,7 +266,14 @@ pub(crate) async fn run_loop_core(
 
         // Check for completion (idle detection - no real git in tests, so always idle)
         // In real usage, this compares git commit hashes
-        if detector.check_completion(None) {
+        // check_completion updates detector's internal state
+        let is_complete = detector.check_completion(None);
+
+        // Sync detector state to RalphState for persistence across restarts
+        state.last_commit = detector.last_commit().map(String::from);
+        state.idle_iterations = detector.idle_count();
+
+        if is_complete {
             state.active = false;
             state.save(&project_dir)?;
             termination_reason = TerminationReason::CompletionDetected;
@@ -374,7 +387,13 @@ pub(crate) async fn run(
         None
     };
 
-    let mut detector = CompletionDetector::new(config.completion.idle_threshold);
+    // Initialize completion detector from persisted state for idle detection
+    // continuity across restarts
+    let mut detector = CompletionDetector::from_state(
+        config.completion.idle_threshold,
+        state.last_commit.clone(),
+        state.idle_iterations,
+    );
 
     // Initialize notifier
     let notifier = Notifier::new(config.monitoring.notifications.clone());
@@ -740,7 +759,14 @@ pub(crate) async fn run(
         let current_commit = get_commit_hash(&cwd).await;
 
         // Check for completion: validation passed + agent idle (no new commits)
-        if detector.check_completion(current_commit.as_deref()) {
+        // check_completion updates detector's internal state (last_commit, idle_count)
+        let is_complete = detector.check_completion(current_commit.as_deref());
+
+        // Sync detector state to RalphState for persistence across restarts
+        state.last_commit = detector.last_commit().map(String::from);
+        state.idle_iterations = detector.idle_count();
+
+        if is_complete {
             println!("{}", format_completion_detected(detector.idle_count()));
             state.active = false;
             state.save(&cwd)?;
@@ -993,6 +1019,8 @@ mod tests {
             error_count: 0,
             consecutive_errors: 0,
             last_error: None,
+            last_commit: None,
+            idle_iterations: 0,
         }
     }
 
@@ -1272,6 +1300,8 @@ timeout_minutes = 60
                 error_count: 0,
                 consecutive_errors: 0,
                 last_error: None,
+                last_commit: None,
+                idle_iterations: 0,
             }
         }
 
