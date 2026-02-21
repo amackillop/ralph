@@ -175,6 +175,10 @@ enum Commands {
         /// Also remove prompt and rules files
         #[arg(long)]
         all: bool,
+
+        /// Remove all worktrees created by Ralph
+        #[arg(long)]
+        worktrees: bool,
     },
 
     /// Manage Docker sandbox image
@@ -238,8 +242,8 @@ async fn main() -> Result<()> {
         Commands::Revert { last } => {
             commands::revert::run(last).await?;
         }
-        Commands::Clean { all } => {
-            commands::clean::run(all)?;
+        Commands::Clean { all, worktrees } => {
+            commands::clean::run(all, worktrees).await?;
         }
         Commands::Image { action } => {
             commands::image::run(action).await?;

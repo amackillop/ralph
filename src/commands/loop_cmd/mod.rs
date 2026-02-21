@@ -2,11 +2,13 @@
 //!
 //! This module runs the iterative AI development loop. Core logic
 //! is separated into submodules for maintainability:
-//! - `git`: Git operations (push, branch, commit)
 //! - `format`: Output formatting and progress display
+//! - `git`: Git operations (push, branch, commit)
+//! - `worktree`: Git worktree management for parallel builds
 
 mod format;
 mod git;
+pub(crate) mod worktree;
 
 use anyhow::{bail, Context, Result};
 use clap::ValueEnum;
