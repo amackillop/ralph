@@ -49,6 +49,14 @@ pub(crate) struct RalphState {
     /// Last error message encountered (if any).
     #[serde(default)]
     pub last_error: Option<String>,
+    /// Last known git commit hash for idle detection.
+    /// Persisted so idle detection survives restarts.
+    #[serde(default)]
+    pub last_commit: Option<String>,
+    /// Consecutive iterations without git changes.
+    /// Persisted so idle detection continues correctly after restart.
+    #[serde(default)]
+    pub idle_iterations: u32,
 }
 
 impl Default for RalphState {
@@ -63,6 +71,8 @@ impl Default for RalphState {
             error_count: 0,
             consecutive_errors: 0,
             last_error: None,
+            last_commit: None,
+            idle_iterations: 0,
         }
     }
 }
@@ -131,6 +141,8 @@ mod tests {
             error_count: 0,
             consecutive_errors: 0,
             last_error: None,
+            last_commit: None,
+            idle_iterations: 0,
         }
     }
 
@@ -149,6 +161,8 @@ mod tests {
         assert_eq!(loaded.error_count, state.error_count);
         assert_eq!(loaded.consecutive_errors, state.consecutive_errors);
         assert_eq!(loaded.last_error, state.last_error);
+        assert_eq!(loaded.last_commit, state.last_commit);
+        assert_eq!(loaded.idle_iterations, state.idle_iterations);
     }
 
     #[test]
@@ -205,6 +219,8 @@ mod tests {
         assert_eq!(state.error_count, 0);
         assert_eq!(state.consecutive_errors, 0);
         assert!(state.last_error.is_none());
+        assert!(state.last_commit.is_none());
+        assert_eq!(state.idle_iterations, 0);
     }
 
     #[test]
@@ -249,6 +265,8 @@ mod tests {
             error_count: 3,
             consecutive_errors: 2,
             last_error: Some("Test error".to_string()),
+            last_commit: None,
+            idle_iterations: 0,
         };
 
         state.save(dir.path()).unwrap();
@@ -261,7 +279,7 @@ mod tests {
 
     #[test]
     fn test_state_backward_compatibility() {
-        // Test that old state files without error fields can still be loaded
+        // Test that old state files without error/idle fields can still be loaded
         // Note: DateTime values must be quoted as strings for TOML deserialization
         let old_state_toml = r#"
 active = true
@@ -276,5 +294,31 @@ last_iteration_at = "2024-01-01T12:05:00Z"
         assert_eq!(state.error_count, 0); // Should default to 0
         assert_eq!(state.consecutive_errors, 0); // Should default to 0
         assert!(state.last_error.is_none()); // Should default to None
+        assert!(state.last_commit.is_none()); // Should default to None
+        assert_eq!(state.idle_iterations, 0); // Should default to 0
+    }
+
+    #[test]
+    fn test_state_with_idle_detection() {
+        let dir = tempdir().unwrap();
+        let state = RalphState {
+            active: true,
+            mode: Mode::Build,
+            iteration: 5,
+            max_iterations: Some(10),
+            started_at: Utc::now(),
+            last_iteration_at: Some(Utc::now()),
+            error_count: 0,
+            consecutive_errors: 0,
+            last_error: None,
+            last_commit: Some("abc123def456".to_string()),
+            idle_iterations: 1,
+        };
+
+        state.save(dir.path()).unwrap();
+        let loaded = RalphState::load(dir.path()).unwrap().unwrap();
+
+        assert_eq!(loaded.last_commit, Some("abc123def456".to_string()));
+        assert_eq!(loaded.idle_iterations, 1);
     }
 }

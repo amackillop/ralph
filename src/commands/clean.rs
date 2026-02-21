@@ -9,13 +9,21 @@ use std::fmt::Write;
 use std::fs;
 use std::path::{Path, PathBuf};
 
+use crate::commands::loop_cmd::worktree;
+
 // -----------------------------------------------------------------------------
 // Public API
 // -----------------------------------------------------------------------------
 
 /// Runs the clean command, removing Ralph state and config files.
-pub(crate) fn run(all: bool) -> Result<()> {
+pub(crate) async fn run(all: bool, worktrees: bool) -> Result<()> {
     let cwd = std::env::current_dir().context("Failed to get current directory")?;
+
+    // Remove worktrees if requested
+    if worktrees {
+        let removed_worktrees = worktree::remove_all_worktrees(&cwd).await?;
+        print!("{}", format_worktree_results(&removed_worktrees));
+    }
 
     let removed = clean_files(
         all,
@@ -119,6 +127,20 @@ fn format_results(removed: &[PathBuf]) -> String {
                 file.display().to_string().dimmed()
             )
             .unwrap();
+        }
+    }
+    out
+}
+
+/// Formats worktree removal results.
+fn format_worktree_results(removed: &[String]) -> String {
+    let mut out = String::new();
+    if removed.is_empty() {
+        writeln!(&mut out, "\n{} No worktrees found to remove.", "ℹ".blue()).unwrap();
+    } else {
+        writeln!(&mut out, "\n{} Removed worktrees:", "✓".green()).unwrap();
+        for branch in removed {
+            writeln!(&mut out, "  {} .worktrees/{}", "✗".red(), branch.dimmed()).unwrap();
         }
     }
     out

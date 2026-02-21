@@ -155,6 +155,10 @@ enum Commands {
         /// Override agent provider (cursor or claude)
         #[arg(long)]
         provider: Option<String>,
+
+        /// Build branches sequentially instead of in parallel (build mode only)
+        #[arg(long)]
+        sequential: bool,
     },
 
     /// Show current Ralph loop status
@@ -175,6 +179,10 @@ enum Commands {
         /// Also remove prompt and rules files
         #[arg(long)]
         all: bool,
+
+        /// Remove all worktrees created by Ralph
+        #[arg(long)]
+        worktrees: bool,
     },
 
     /// Manage Docker sandbox image
@@ -207,6 +215,7 @@ async fn main() -> Result<()> {
             no_sandbox,
             prompt,
             provider,
+            sequential,
         } => {
             // Load config to get log file settings
             let cwd = std::env::current_dir().context("Failed to get current directory")?;
@@ -227,7 +236,15 @@ async fn main() -> Result<()> {
                 })
             };
 
-            commands::loop_cmd::run(mode, effective_max, no_sandbox, prompt, provider).await?;
+            commands::loop_cmd::run(
+                mode,
+                effective_max,
+                no_sandbox,
+                prompt,
+                provider,
+                sequential,
+            )
+            .await?;
         }
         Commands::Status => {
             commands::status::run()?;
@@ -238,8 +255,8 @@ async fn main() -> Result<()> {
         Commands::Revert { last } => {
             commands::revert::run(last).await?;
         }
-        Commands::Clean { all } => {
-            commands::clean::run(all)?;
+        Commands::Clean { all, worktrees } => {
+            commands::clean::run(all, worktrees).await?;
         }
         Commands::Image { action } => {
             commands::image::run(action).await?;

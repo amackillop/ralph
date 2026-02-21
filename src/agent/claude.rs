@@ -261,12 +261,17 @@ mod tests {
 
     #[tokio::test]
     async fn test_invoke_with_mock_binary_success() {
+        // Skip in nix sandbox where shell scripts don't work
+        if crate::agent::is_nix_sandbox() {
+            return;
+        }
+
         // Create a mock binary that echoes stdin to stdout (simulates Claude behavior)
         let temp_dir = tempfile::tempdir().unwrap();
         let mock_path = temp_dir.path().join("mock-claude");
 
         // Shell script: read stdin and echo it back
-        crate::agent::create_mock_executable(&mock_path, b"#!/bin/sh\ncat\n");
+        crate::agent::create_mock_executable(&mock_path, b"#!/usr/bin/env sh\ncat\n");
 
         let config = ClaudeConfig {
             path: mock_path.to_str().unwrap().to_string(),
@@ -284,13 +289,18 @@ mod tests {
 
     #[tokio::test]
     async fn test_invoke_with_mock_binary_failure() {
+        // Skip in nix sandbox where shell scripts don't work
+        if crate::agent::is_nix_sandbox() {
+            return;
+        }
+
         // Create a mock binary that fails with exit code 1
         let temp_dir = tempfile::tempdir().unwrap();
         let mock_path = temp_dir.path().join("mock-claude-fail");
 
         crate::agent::create_mock_executable(
             &mock_path,
-            b"#!/bin/sh\necho 'Error message' >&2\nexit 1\n",
+            b"#!/usr/bin/env sh\necho 'Error message' >&2\nexit 1\n",
         );
 
         let config = ClaudeConfig {
@@ -309,11 +319,16 @@ mod tests {
 
     #[tokio::test]
     async fn test_invoke_uses_correct_working_directory() {
+        // Skip in nix sandbox where shell scripts don't work
+        if crate::agent::is_nix_sandbox() {
+            return;
+        }
+
         // Mock binary that outputs the current working directory
         let temp_dir = tempfile::tempdir().unwrap();
         let mock_path = temp_dir.path().join("mock-claude-pwd");
 
-        crate::agent::create_mock_executable(&mock_path, b"#!/bin/sh\npwd\n");
+        crate::agent::create_mock_executable(&mock_path, b"#!/usr/bin/env sh\npwd\n");
 
         let config = ClaudeConfig {
             path: mock_path.to_str().unwrap().to_string(),

@@ -303,6 +303,8 @@ mod tests {
             error_count: 0,
             consecutive_errors: 0,
             last_error: None,
+            last_commit: None,
+            idle_iterations: 0,
         };
 
         let status = StatusDisplay::from_state(&state, &[]);
@@ -439,6 +441,8 @@ mod tests {
             error_count: 0,
             consecutive_errors: 0,
             last_error: None,
+            last_commit: None,
+            idle_iterations: 0,
         };
 
         let status = StatusDisplay::from_state(&state, &[]);
@@ -461,6 +465,8 @@ mod tests {
             error_count: 3,
             consecutive_errors: 2,
             last_error: Some("Git push failed: connection timeout".to_string()),
+            last_commit: None,
+            idle_iterations: 0,
         };
 
         let status = StatusDisplay::from_state(&state, &[]);

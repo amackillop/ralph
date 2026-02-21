@@ -364,6 +364,28 @@ impl Default for ResourceConfig {
     }
 }
 
+/// Worktree identity configuration for bot commits.
+///
+/// When configured, Ralph applies these settings to each worktree via
+/// `git config --worktree` to ensure commits use a distinct identity.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub(crate) struct WorktreeConfig {
+    /// Git author name for commits in worktree.
+    pub name: String,
+
+    /// Git author email for commits in worktree.
+    pub email: String,
+
+    /// GPG key ID for signed commits (optional).
+    #[serde(default)]
+    pub signing_key: Option<String>,
+
+    /// Path to SSH key for push operations (optional).
+    /// Used to set `core.sshCommand` in worktree config.
+    #[serde(default)]
+    pub ssh_key: Option<String>,
+}
+
 /// Git integration configuration.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub(crate) struct GitConfig {
@@ -371,18 +393,37 @@ pub(crate) struct GitConfig {
     #[serde(default = "default_true")]
     pub auto_push: bool,
 
+    /// Automatically create PR when branch work completes.
+    #[serde(default = "default_true")]
+    pub auto_pr: bool,
+
+    /// Base branch for pull requests.
+    #[serde(default = "default_pr_base")]
+    pub pr_base: String,
+
     /// Branches that should not be modified directly.
     #[serde(default = "default_protected_branches")]
     pub protected_branches: Vec<String>,
+
+    /// Worktree identity configuration for bot commits.
+    #[serde(default)]
+    pub worktree: Option<WorktreeConfig>,
 }
 
 impl Default for GitConfig {
     fn default() -> Self {
         Self {
             auto_push: true,
+            auto_pr: true,
+            pr_base: default_pr_base(),
             protected_branches: default_protected_branches(),
+            worktree: None,
         }
     }
+}
+
+fn default_pr_base() -> String {
+    "master".to_string()
 }
 
 /// Completion detection configuration.
@@ -938,5 +979,68 @@ timeout_minutes = 180
         let config = Config::default();
         assert_eq!(config.agent.get_provider_timeout(Provider::Cursor), None);
         assert_eq!(config.agent.get_provider_timeout(Provider::Claude), None);
+    }
+
+    #[test]
+    fn test_git_config_defaults() {
+        let config = Config::default();
+        assert!(config.git.auto_push);
+        assert!(config.git.auto_pr);
+        assert_eq!(config.git.pr_base, "master");
+        assert!(config.git.worktree.is_none());
+    }
+
+    #[test]
+    fn test_git_auto_pr_custom() {
+        let toml = r#"
+[git]
+auto_pr = false
+pr_base = "develop"
+"#;
+        let config: Config = toml::from_str(toml).unwrap();
+        assert!(!config.git.auto_pr);
+        assert_eq!(config.git.pr_base, "develop");
+    }
+
+    #[test]
+    fn test_worktree_config_full() {
+        let toml = r#"
+[git.worktree]
+name = "ralph-bot"
+email = "ralph@example.com"
+signing_key = "ABCD1234"
+ssh_key = "~/.ssh/ralph-bot"
+"#;
+        let config: Config = toml::from_str(toml).unwrap();
+        let worktree = config.git.worktree.unwrap();
+        assert_eq!(worktree.name, "ralph-bot");
+        assert_eq!(worktree.email, "ralph@example.com");
+        assert_eq!(worktree.signing_key, Some("ABCD1234".to_string()));
+        assert_eq!(worktree.ssh_key, Some("~/.ssh/ralph-bot".to_string()));
+    }
+
+    #[test]
+    fn test_worktree_config_minimal() {
+        let toml = r#"
+[git.worktree]
+name = "bot"
+email = "bot@example.com"
+"#;
+        let config: Config = toml::from_str(toml).unwrap();
+        let worktree = config.git.worktree.unwrap();
+        assert_eq!(worktree.name, "bot");
+        assert_eq!(worktree.email, "bot@example.com");
+        assert!(worktree.signing_key.is_none());
+        assert!(worktree.ssh_key.is_none());
+    }
+
+    #[test]
+    fn test_worktree_config_absent() {
+        let toml = r"
+[git]
+auto_push = true
+";
+        let config: Config = toml::from_str(toml).unwrap();
+        assert!(config.git.worktree.is_none());
     }
 }

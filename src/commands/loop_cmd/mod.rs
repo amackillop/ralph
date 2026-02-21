@@ -2,11 +2,13 @@
 //!
 //! This module runs the iterative AI development loop. Core logic
 //! is separated into submodules for maintainability:
-//! - `git`: Git operations (push, branch, commit)
 //! - `format`: Output formatting and progress display
+//! - `git`: Git operations (push, branch, commit)
+//! - `worktree`: Git worktree management for parallel builds
 
 mod format;
 mod git;
+pub(crate) mod worktree;
 
 use anyhow::{bail, Context, Result};
 use clap::ValueEnum;
@@ -24,7 +26,33 @@ use format::{
     format_banner, format_completion_detected, format_iteration_header, format_loop_finished,
     format_max_iterations_reached, format_progress, BannerInfo, ProgressInfo,
 };
-use git::git_push;
+use git::{check_gh_available, create_pull_request, git_push};
+use worktree::{
+    configure_worktree_identity, copy_plan_to_worktree, create_worktree, enable_worktree_config,
+    parse_implementation_plan, worktree_path, BranchSection,
+};
+
+/// Check if a branch section has incomplete tasks.
+///
+/// Returns true if the branch has any unchecked `- [ ]` tasks before the next
+/// `## Branch:` header.
+fn is_branch_incomplete(plan_content: &str, branch_name: &str) -> bool {
+    let header = format!("## Branch: {branch_name}");
+    let Some(start) = plan_content.find(&header) else {
+        return false;
+    };
+
+    // Find where this branch section ends (next ## Branch: or end of file)
+    let section_start = start + header.len();
+    let section_end = plan_content[section_start..]
+        .find("## Branch:")
+        .map_or(plan_content.len(), |pos| section_start + pos);
+
+    let section = &plan_content[section_start..section_end];
+
+    // Check for any unchecked tasks
+    section.contains("- [ ]")
+}
 
 // -----------------------------------------------------------------------------
 // Dependency Injection for Testing
@@ -93,7 +121,13 @@ pub(crate) async fn run_loop_core(
     state.active = true;
     state.save(&project_dir)?;
 
-    let mut detector = CompletionDetector::new(config.completion.idle_threshold);
+    // Initialize completion detector from persisted state for idle detection
+    // continuity across restarts
+    let mut detector = CompletionDetector::from_state(
+        config.completion.idle_threshold,
+        state.last_commit.clone(),
+        state.idle_iterations,
+    );
 
     // Create persistent container if sandbox is enabled and reuse is configured
     let persistent_container_name = if let Some(ref sb) = sandbox {
@@ -260,7 +294,14 @@ pub(crate) async fn run_loop_core(
 
         // Check for completion (idle detection - no real git in tests, so always idle)
         // In real usage, this compares git commit hashes
-        if detector.check_completion(None) {
+        // check_completion updates detector's internal state
+        let is_complete = detector.check_completion(None);
+
+        // Sync detector state to RalphState for persistence across restarts
+        state.last_commit = detector.last_commit().map(String::from);
+        state.idle_iterations = detector.idle_count();
+
+        if is_complete {
             state.active = false;
             state.save(&project_dir)?;
             termination_reason = TerminationReason::CompletionDetected;
@@ -285,6 +326,515 @@ pub(crate) async fn run_loop_core(
 }
 
 // -----------------------------------------------------------------------------
+// Branch Build Types
+// -----------------------------------------------------------------------------
+
+/// Result of building a single branch.
+#[derive(Debug, Clone)]
+pub(crate) struct BranchResult {
+    /// Branch name.
+    pub branch: String,
+    /// Whether the build succeeded.
+    pub success: bool,
+    /// Final iteration count.
+    pub iterations: u32,
+    /// Error message if failed.
+    pub error: Option<String>,
+    /// PR URL if created.
+    pub pr_url: Option<String>,
+}
+
+impl BranchResult {
+    fn success(branch: &str, iterations: u32, pr_url: Option<String>) -> Self {
+        Self {
+            branch: branch.to_string(),
+            success: true,
+            iterations,
+            error: None,
+            pr_url,
+        }
+    }
+
+    fn failure(branch: &str, iterations: u32, error: String) -> Self {
+        Self {
+            branch: branch.to_string(),
+            success: false,
+            iterations,
+            error: Some(error),
+            pr_url: None,
+        }
+    }
+}
+
+// -----------------------------------------------------------------------------
+// Branch Build Execution
+// -----------------------------------------------------------------------------
+
+/// Execute builds for all branches in parallel or sequential mode.
+#[allow(tail_expr_drop_order)]
+async fn execute_branch_builds(
+    branches: Vec<BranchSection>,
+    config: &Config,
+    max_iterations: Option<u32>,
+    no_sandbox: bool,
+    provider_override: Option<&str>,
+    sequential: bool,
+) -> Result<Vec<BranchResult>> {
+    let cwd = std::env::current_dir().context("Failed to get current directory")?;
+
+    // Enable worktree config extension
+    enable_worktree_config(&cwd).await?;
+
+    // Check if gh CLI is available for PR creation
+    let gh_available = config.git.auto_pr && check_gh_available().await;
+    if config.git.auto_pr && !gh_available {
+        warn!("gh CLI not available or not authenticated. PRs will not be created automatically.");
+    }
+
+    // Prepare worktrees for all branches
+    info!("Preparing {} worktrees...", branches.len());
+    for branch in &branches {
+        // Create worktree
+        if let Err(e) = create_worktree(&cwd, &branch.name).await {
+            // Branch may already exist, try to continue
+            warn!("Failed to create worktree for '{}': {}", branch.name, e);
+            continue;
+        }
+
+        // Configure identity if specified
+        if let Some(ref wt_config) = config.git.worktree {
+            if let Err(e) = configure_worktree_identity(&cwd, &branch.name, wt_config).await {
+                warn!("Failed to configure identity for '{}': {}", branch.name, e);
+            }
+        }
+
+        // Copy implementation plan
+        if let Err(e) = copy_plan_to_worktree(&cwd, &branch.name) {
+            warn!("Failed to copy plan to '{}': {}", branch.name, e);
+        }
+    }
+
+    // Execute builds
+    let results = if sequential {
+        execute_sequential(
+            &cwd,
+            branches,
+            config,
+            max_iterations,
+            no_sandbox,
+            provider_override,
+            gh_available,
+        )
+        .await
+    } else {
+        execute_parallel(
+            &cwd,
+            branches,
+            config,
+            max_iterations,
+            no_sandbox,
+            provider_override,
+            gh_available,
+        )
+        .await
+    };
+
+    results
+}
+
+/// Execute branch builds sequentially.
+async fn execute_sequential(
+    project_dir: &Path,
+    branches: Vec<BranchSection>,
+    config: &Config,
+    max_iterations: Option<u32>,
+    no_sandbox: bool,
+    provider_override: Option<&str>,
+    gh_available: bool,
+) -> Result<Vec<BranchResult>> {
+    let mut results = Vec::with_capacity(branches.len());
+
+    for branch in branches {
+        info!("Building branch '{}' sequentially...", branch.name);
+        let result = build_single_branch(
+            project_dir,
+            &branch,
+            config,
+            max_iterations,
+            no_sandbox,
+            provider_override,
+            gh_available,
+        )
+        .await;
+        results.push(result);
+    }
+
+    Ok(results)
+}
+
+/// Execute branch builds in parallel using tokio `JoinSet`.
+#[allow(tail_expr_drop_order)]
+async fn execute_parallel(
+    project_dir: &Path,
+    branches: Vec<BranchSection>,
+    config: &Config,
+    max_iterations: Option<u32>,
+    no_sandbox: bool,
+    provider_override: Option<&str>,
+    gh_available: bool,
+) -> Result<Vec<BranchResult>> {
+    use tokio::task::JoinSet;
+
+    let mut join_set = JoinSet::new();
+
+    for branch in branches {
+        let project_dir = project_dir.to_path_buf();
+        let config = config.clone();
+        let provider_override = provider_override.map(String::from);
+
+        join_set.spawn(async move {
+            info!("Building branch '{}' in parallel...", branch.name);
+            build_single_branch(
+                &project_dir,
+                &branch,
+                &config,
+                max_iterations,
+                no_sandbox,
+                provider_override.as_deref(),
+                gh_available,
+            )
+            .await
+        });
+    }
+
+    let mut results = Vec::new();
+    while let Some(result) = join_set.join_next().await {
+        match result {
+            Ok(branch_result) => results.push(branch_result),
+            Err(e) => {
+                warn!("Branch task panicked: {}", e);
+            }
+        }
+    }
+
+    Ok(results)
+}
+
+/// Build a single branch in its worktree.
+async fn build_single_branch(
+    project_dir: &Path,
+    branch: &BranchSection,
+    config: &Config,
+    max_iterations: Option<u32>,
+    no_sandbox: bool,
+    provider_override: Option<&str>,
+    gh_available: bool,
+) -> BranchResult {
+    let wt_path = worktree_path(project_dir, &branch.name);
+
+    // Run the loop in the worktree directory
+    match run_branch_loop(
+        &wt_path,
+        config,
+        max_iterations,
+        no_sandbox,
+        provider_override,
+    )
+    .await
+    {
+        Ok(iterations) => {
+            // Try to create PR if enabled
+            let pr_url = if gh_available {
+                match create_pull_request(
+                    &wt_path,
+                    &branch.name,
+                    &config.git.pr_base,
+                    &format!("{}: {}", branch.name, branch.goal),
+                    &format!(
+                        "## Summary\n\n{}\n\n## Branch\n\n`{}`\n\n---\n\n🤖 Generated by Ralph",
+                        branch.goal, branch.name
+                    ),
+                )
+                .await
+                {
+                    Ok(url) => Some(url),
+                    Err(e) => {
+                        warn!("Failed to create PR for '{}': {}", branch.name, e);
+                        None
+                    }
+                }
+            } else {
+                None
+            };
+
+            BranchResult::success(&branch.name, iterations, pr_url)
+        }
+        Err(e) => BranchResult::failure(&branch.name, 0, e.to_string()),
+    }
+}
+
+/// Run the loop for a single branch (simplified version of the main loop).
+#[allow(clippy::too_many_lines, tail_expr_drop_order)]
+async fn run_branch_loop(
+    wt_path: &Path,
+    config: &Config,
+    max_iterations: Option<u32>,
+    no_sandbox: bool,
+    provider_override: Option<&str>,
+) -> Result<u32> {
+    use crate::detection::{get_commit_hash, CompletionDetector};
+
+    // Determine prompt file
+    let prompt_file = wt_path.join("PROMPT_build.md");
+    if !prompt_file.exists() {
+        bail!(
+            "Prompt file not found in worktree: {}",
+            prompt_file.display()
+        );
+    }
+
+    // Load or create state for this worktree
+    let mut state = RalphState::load_or_create(wt_path, Mode::Build)?;
+    state.max_iterations = max_iterations;
+    state.active = true;
+    state.save(wt_path)?;
+
+    // Get agent provider
+    let provider = resolve_provider(config, provider_override)?;
+
+    // Create agent
+    let agent: Box<dyn AgentProvider> = match provider {
+        Provider::Cursor => Box::new(CursorProvider::new(config.agent.cursor.clone())),
+        Provider::Claude => Box::new(ClaudeProvider::new(config.agent.claude.clone())),
+    };
+
+    // Create sandbox if enabled
+    let sandbox: Option<Box<dyn Sandbox>> = if !no_sandbox && config.sandbox.enabled {
+        Some(Box::new(DockerSandbox::new(
+            config.clone(),
+            provider,
+            config.agent.clone(),
+        )))
+    } else {
+        None
+    };
+
+    // Initialize completion detector
+    let mut detector = CompletionDetector::from_state(
+        config.completion.idle_threshold,
+        state.last_commit.clone(),
+        state.idle_iterations,
+    );
+
+    // Main loop for this branch
+    loop {
+        // Check for cancellation
+        if let Some(loaded) = RalphState::load(wt_path)? {
+            if !loaded.active {
+                state.active = false;
+                state.save(wt_path)?;
+                break;
+            }
+        }
+
+        // Check max iterations
+        if state
+            .max_iterations
+            .is_some_and(|max| state.iteration > max)
+        {
+            state.active = false;
+            state.save(wt_path)?;
+            break;
+        }
+
+        // Record commit hash at start
+        let start_commit = get_commit_hash(wt_path).await;
+        detector.record_commit(start_commit);
+
+        // Read prompt
+        let mut prompt = std::fs::read_to_string(&prompt_file)
+            .with_context(|| format!("Failed to read prompt file: {}", prompt_file.display()))?;
+
+        // Append validation errors if present
+        if let Some(ref last_error) = state.last_error {
+            if last_error.starts_with("Validation error:") {
+                let error_details = last_error
+                    .strip_prefix("Validation error:")
+                    .unwrap_or(last_error);
+                prompt.push_str("\n\n## ⚠️ VALIDATION ERROR FROM PREVIOUS ITERATION\n");
+                prompt.push_str("The following validation error occurred. Please fix it:\n\n```\n");
+                prompt.push_str(error_details.trim());
+                prompt.push_str("\n```\n\nFix the issues above and ensure validation passes.\n");
+            }
+        }
+
+        // Run agent
+        let output_result = if let Some(ref sb) = sandbox {
+            sb.run(wt_path, &prompt, None).await
+        } else {
+            let timeout_mins = resolve_timeout(config, provider);
+            let timeout_duration = std::time::Duration::from_secs(u64::from(timeout_mins) * 60);
+            tokio::time::timeout(timeout_duration, agent.invoke(wt_path, &prompt))
+                .await
+                .unwrap_or_else(|_| {
+                    Err(anyhow::anyhow!(
+                        "Agent execution timed out after {timeout_mins} minutes"
+                    ))
+                })
+        };
+
+        // Handle result
+        match output_result {
+            Ok(_) => {
+                state.consecutive_errors = 0;
+            }
+            Err(e) => {
+                let error_msg = e.to_string();
+                let is_recoverable = error_msg.contains("timed out")
+                    || error_msg.contains("rate limit")
+                    || error_msg.contains("resource_exhausted");
+
+                if is_recoverable {
+                    state.error_count += 1;
+                    state.consecutive_errors += 1;
+                    state.last_error = Some(error_msg);
+                    state.iteration += 1;
+                    state.save(wt_path)?;
+
+                    if config.monitoring.max_consecutive_errors > 0
+                        && state.consecutive_errors >= config.monitoring.max_consecutive_errors
+                    {
+                        state.active = false;
+                        state.save(wt_path)?;
+                        bail!("Circuit breaker triggered");
+                    }
+                    continue;
+                }
+                return Err(e);
+            }
+        }
+
+        // Validate if enabled
+        if config.validation.enabled {
+            if let Err(validation_error) = validate_code(wt_path, &config.validation.command).await
+            {
+                state.error_count += 1;
+                state.consecutive_errors += 1;
+                state.last_error = Some(format!("Validation error:{validation_error}"));
+                state.iteration += 1;
+                state.save(wt_path)?;
+
+                if config.monitoring.max_consecutive_errors > 0
+                    && state.consecutive_errors >= config.monitoring.max_consecutive_errors
+                {
+                    state.active = false;
+                    state.save(wt_path)?;
+                    bail!("Circuit breaker triggered");
+                }
+                continue;
+            }
+            // Clear validation error on success
+            if state
+                .last_error
+                .as_ref()
+                .is_some_and(|e| e.starts_with("Validation error:"))
+            {
+                state.last_error = None;
+            }
+        }
+
+        state.last_iteration_at = Some(chrono::Utc::now());
+        state.save(wt_path)?;
+
+        // Check completion (idle detection)
+        let current_commit = get_commit_hash(wt_path).await;
+        let is_complete = detector.check_completion(current_commit.as_deref());
+
+        state.last_commit = detector.last_commit().map(String::from);
+        state.idle_iterations = detector.idle_count();
+
+        if is_complete {
+            state.active = false;
+            state.save(wt_path)?;
+            break;
+        }
+
+        // Git push if enabled
+        if config.git.auto_push {
+            if let Err(e) = git_push(wt_path, &config.git.protected_branches).await {
+                warn!("Git push failed in worktree: {}", e);
+            }
+        }
+
+        state.iteration += 1;
+        state.save(wt_path)?;
+    }
+
+    Ok(state.iteration)
+}
+
+/// Format a summary of branch build results.
+fn format_branch_summary(results: &[BranchResult]) -> String {
+    use std::fmt::Write;
+
+    let mut out = String::new();
+    writeln!(
+        out,
+        "\n═══════════════════════════════════════════════════════════════"
+    )
+    .unwrap();
+    writeln!(out, "  Branch Build Summary").unwrap();
+    writeln!(
+        out,
+        "═══════════════════════════════════════════════════════════════"
+    )
+    .unwrap();
+
+    let succeeded: Vec<_> = results.iter().filter(|r| r.success).collect();
+    let failed: Vec<_> = results.iter().filter(|r| !r.success).collect();
+
+    writeln!(
+        out,
+        "\n  ✅ Succeeded: {}  ❌ Failed: {}",
+        succeeded.len(),
+        failed.len()
+    )
+    .unwrap();
+
+    if !succeeded.is_empty() {
+        writeln!(out, "\n  Successful branches:").unwrap();
+        for r in &succeeded {
+            let pr_info = r
+                .pr_url
+                .as_ref()
+                .map(|url| format!(" → {url}"))
+                .unwrap_or_default();
+            writeln!(
+                out,
+                "    ✓ {} ({} iterations){pr_info}",
+                r.branch, r.iterations
+            )
+            .unwrap();
+        }
+    }
+
+    if !failed.is_empty() {
+        writeln!(out, "\n  Failed branches:").unwrap();
+        for r in &failed {
+            let error = r.error.as_deref().unwrap_or("Unknown error");
+            writeln!(out, "    ✗ {}: {}", r.branch, error).unwrap();
+        }
+    }
+
+    writeln!(
+        out,
+        "\n═══════════════════════════════════════════════════════════════"
+    )
+    .unwrap();
+    out
+}
+
+// -----------------------------------------------------------------------------
 // Public API
 // -----------------------------------------------------------------------------
 
@@ -296,11 +846,65 @@ pub(crate) async fn run(
     no_sandbox: bool,
     custom_prompt: Option<String>,
     provider_override: Option<String>,
+    sequential: bool,
 ) -> Result<()> {
     let cwd = std::env::current_dir().context("Failed to get current directory")?;
 
     // Load configuration
     let config = Config::load(&cwd).context("Failed to load ralph.toml")?;
+
+    // Check for branch build mode: build mode + IMPLEMENTATION_PLAN.md with branches
+    if mode == LoopMode::Build && custom_prompt.is_none() {
+        let plan_path = cwd.join("IMPLEMENTATION_PLAN.md");
+        if plan_path.exists() {
+            let plan_content = std::fs::read_to_string(&plan_path)
+                .context("Failed to read IMPLEMENTATION_PLAN.md")?;
+            let branches = parse_implementation_plan(&plan_content);
+
+            // Filter to only incomplete branches (those with unchecked tasks)
+            let incomplete_branches: Vec<_> = branches
+                .into_iter()
+                .filter(|b| {
+                    // Check if branch section has unchecked tasks
+                    // A branch is complete if all its tasks are checked [x]
+                    is_branch_incomplete(&plan_content, &b.name)
+                })
+                .collect();
+
+            if !incomplete_branches.is_empty() {
+                info!(
+                    "Found {} incomplete branches in IMPLEMENTATION_PLAN.md",
+                    incomplete_branches.len()
+                );
+                let mode_str = if sequential { "sequential" } else { "parallel" };
+                println!(
+                    "Building {} branches in {} mode...\n",
+                    incomplete_branches.len(),
+                    mode_str
+                );
+
+                let results = execute_branch_builds(
+                    incomplete_branches,
+                    &config,
+                    max_iterations,
+                    no_sandbox,
+                    provider_override.as_deref(),
+                    sequential,
+                )
+                .await?;
+
+                print!("{}", format_branch_summary(&results));
+
+                // Return error if any branch failed
+                let failed_count = results.iter().filter(|r| !r.success).count();
+                if failed_count > 0 {
+                    bail!("{failed_count} branch(es) failed");
+                }
+
+                return Ok(());
+            }
+        }
+    }
 
     // Determine prompt file
     let prompt_file = determine_prompt_file(&cwd, mode, custom_prompt.as_deref());
@@ -374,7 +978,13 @@ pub(crate) async fn run(
         None
     };
 
-    let mut detector = CompletionDetector::new(config.completion.idle_threshold);
+    // Initialize completion detector from persisted state for idle detection
+    // continuity across restarts
+    let mut detector = CompletionDetector::from_state(
+        config.completion.idle_threshold,
+        state.last_commit.clone(),
+        state.idle_iterations,
+    );
 
     // Initialize notifier
     let notifier = Notifier::new(config.monitoring.notifications.clone());
@@ -740,7 +1350,14 @@ pub(crate) async fn run(
         let current_commit = get_commit_hash(&cwd).await;
 
         // Check for completion: validation passed + agent idle (no new commits)
-        if detector.check_completion(current_commit.as_deref()) {
+        // check_completion updates detector's internal state (last_commit, idle_count)
+        let is_complete = detector.check_completion(current_commit.as_deref());
+
+        // Sync detector state to RalphState for persistence across restarts
+        state.last_commit = detector.last_commit().map(String::from);
+        state.idle_iterations = detector.idle_count();
+
+        if is_complete {
             println!("{}", format_completion_detected(detector.idle_count()));
             state.active = false;
             state.save(&cwd)?;
@@ -993,6 +1610,8 @@ mod tests {
             error_count: 0,
             consecutive_errors: 0,
             last_error: None,
+            last_commit: None,
+            idle_iterations: 0,
         }
     }
 
@@ -1229,6 +1848,134 @@ timeout_minutes = 60
     }
 
     // -------------------------------------------------------------------------
+    // Branch Build Tests
+    // -------------------------------------------------------------------------
+
+    #[test]
+    fn test_is_branch_incomplete_with_unchecked_tasks() {
+        let plan = r"
+## Branch: feature-a
+Goal: Add feature A
+Base: master
+
+- [ ] Task 1
+- [ ] Task 2
+";
+        assert!(is_branch_incomplete(plan, "feature-a"));
+    }
+
+    #[test]
+    fn test_is_branch_incomplete_with_all_checked_tasks() {
+        let plan = r"
+## Branch: feature-a
+Goal: Add feature A
+Base: master
+
+- [x] Task 1
+- [x] Task 2
+";
+        assert!(!is_branch_incomplete(plan, "feature-a"));
+    }
+
+    #[test]
+    fn test_is_branch_incomplete_with_mixed_tasks() {
+        let plan = r"
+## Branch: feature-a
+Goal: Add feature A
+Base: master
+
+- [x] Task 1
+- [ ] Task 2
+";
+        assert!(is_branch_incomplete(plan, "feature-a"));
+    }
+
+    #[test]
+    fn test_is_branch_incomplete_branch_not_found() {
+        let plan = r"
+## Branch: other-branch
+Goal: Other
+Base: master
+";
+        assert!(!is_branch_incomplete(plan, "feature-a"));
+    }
+
+    #[test]
+    fn test_is_branch_incomplete_scoped_to_branch() {
+        // Ensure we only check tasks within the branch's section
+        let plan = r"
+## Branch: feature-a
+Goal: Add feature A
+Base: master
+
+- [x] Task 1
+- [x] Task 2
+
+## Branch: feature-b
+Goal: Add feature B
+Base: master
+
+- [ ] Task 3
+";
+        // feature-a should be complete (all tasks checked)
+        assert!(!is_branch_incomplete(plan, "feature-a"));
+        // feature-b should be incomplete
+        assert!(is_branch_incomplete(plan, "feature-b"));
+    }
+
+    #[test]
+    fn test_branch_result_success() {
+        let result = BranchResult::success(
+            "test-branch",
+            5,
+            Some("http://example.com/pr/1".to_string()),
+        );
+        assert!(result.success);
+        assert_eq!(result.branch, "test-branch");
+        assert_eq!(result.iterations, 5);
+        assert!(result.error.is_none());
+        assert_eq!(result.pr_url, Some("http://example.com/pr/1".to_string()));
+    }
+
+    #[test]
+    fn test_branch_result_failure() {
+        let result = BranchResult::failure("test-branch", 3, "Something went wrong".to_string());
+        assert!(!result.success);
+        assert_eq!(result.branch, "test-branch");
+        assert_eq!(result.iterations, 3);
+        assert_eq!(result.error, Some("Something went wrong".to_string()));
+        assert!(result.pr_url.is_none());
+    }
+
+    #[test]
+    fn test_format_branch_summary_all_success() {
+        let results = vec![
+            BranchResult::success("branch-a", 5, Some("http://pr/1".to_string())),
+            BranchResult::success("branch-b", 3, None),
+        ];
+        let summary = format_branch_summary(&results);
+        assert!(summary.contains("Succeeded: 2"));
+        assert!(summary.contains("Failed: 0"));
+        assert!(summary.contains("branch-a"));
+        assert!(summary.contains("branch-b"));
+        assert!(summary.contains("http://pr/1"));
+    }
+
+    #[test]
+    fn test_format_branch_summary_mixed() {
+        let results = vec![
+            BranchResult::success("branch-a", 5, None),
+            BranchResult::failure("branch-b", 3, "Build failed".to_string()),
+        ];
+        let summary = format_branch_summary(&results);
+        assert!(summary.contains("Succeeded: 1"));
+        assert!(summary.contains("Failed: 1"));
+        assert!(summary.contains("branch-a"));
+        assert!(summary.contains("branch-b"));
+        assert!(summary.contains("Build failed"));
+    }
+
+    // -------------------------------------------------------------------------
     // E2E Loop Tests
     // -------------------------------------------------------------------------
 
@@ -1272,6 +2019,8 @@ timeout_minutes = 60
                 error_count: 0,
                 consecutive_errors: 0,
                 last_error: None,
+                last_commit: None,
+                idle_iterations: 0,
             }
         }
 
@@ -1559,6 +2308,179 @@ timeout_minutes = 60
             assert_eq!(result.termination_reason, TerminationReason::Cancelled);
             // Only one iteration should have run before cancellation was detected
             assert_eq!(agent.invocation_count(), 1);
+        }
+
+        #[tokio::test]
+        async fn test_e2e_loop_plan_mode() {
+            // Test: Plan mode uses correct prompt file and state mode
+            let dir = tempdir().unwrap();
+            let project_dir = dir.path().to_path_buf();
+
+            // Create plan mode prompt file (not build mode)
+            let prompt_file = project_dir.join("PROMPT_plan.md");
+            std::fs::write(&prompt_file, "Plan mode prompt content").unwrap();
+
+            let agent = MockAgentProvider::always_succeed("Generated plan output");
+
+            let deps = LoopDependencies {
+                agent: Box::new(agent.clone()),
+                sandbox: None,
+                config: test_config(),
+                project_dir: project_dir.clone(),
+                prompt_file,
+            };
+
+            // Create state in Plan mode (not Build)
+            let state = RalphState {
+                active: false,
+                mode: Mode::Plan, // Plan mode
+                iteration: 1,
+                max_iterations: Some(2),
+                started_at: Utc::now(),
+                last_iteration_at: None,
+                error_count: 0,
+                consecutive_errors: 0,
+                last_error: None,
+                last_commit: None,
+                idle_iterations: 0,
+            };
+
+            let result = run_loop_core(deps, state).await.unwrap();
+
+            // Plan mode should complete via idle detection (no git commits in test)
+            assert_eq!(
+                result.termination_reason,
+                TerminationReason::CompletionDetected
+            );
+            assert_eq!(agent.invocation_count(), 2);
+
+            // Verify saved state reflects Plan mode
+            let loaded = RalphState::load(&project_dir).unwrap().unwrap();
+            assert_eq!(loaded.mode, Mode::Plan);
+        }
+
+        #[tokio::test]
+        async fn test_e2e_loop_state_persistence_across_restart() {
+            // Test: State persists correctly and loop can resume from saved state
+            // Simulates restart by running loop partially, then loading state and running again
+            let dir = tempdir().unwrap();
+            let project_dir = dir.path().to_path_buf();
+            let prompt_file = project_dir.join("PROMPT_build.md");
+            std::fs::write(&prompt_file, "Test prompt").unwrap();
+
+            // First run: 2 iterations, then stops due to max iterations
+            let agent1 = MockAgentProvider::always_succeed("First run output");
+            let mut config = test_config();
+            config.completion.idle_threshold = 100; // High to prevent idle completion
+
+            let deps1 = LoopDependencies {
+                agent: Box::new(agent1.clone()),
+                sandbox: None,
+                config: config.clone(),
+                project_dir: project_dir.clone(),
+                prompt_file: prompt_file.clone(),
+            };
+
+            let state1 = RalphState {
+                active: false,
+                mode: Mode::Build,
+                iteration: 1,
+                max_iterations: Some(2),
+                started_at: Utc::now(),
+                last_iteration_at: None,
+                error_count: 0,
+                consecutive_errors: 0,
+                last_error: None,
+                last_commit: None,
+                idle_iterations: 0,
+            };
+
+            let result1 = run_loop_core(deps1, state1).await.unwrap();
+            assert_eq!(result1.termination_reason, TerminationReason::MaxIterations);
+            assert_eq!(agent1.invocation_count(), 2);
+
+            // Simulate restart: load state from disk
+            let loaded_state = RalphState::load(&project_dir).unwrap().unwrap();
+            assert!(!loaded_state.active); // Should be inactive after completion
+            assert!(loaded_state.iteration > 1); // Should have advanced
+
+            // Verify state fields persisted correctly
+            assert_eq!(loaded_state.mode, Mode::Build);
+            assert_eq!(loaded_state.error_count, 0);
+
+            // Create new state for "resumed" session, starting from where we left off
+            // max_iterations is iteration (not iteration + 1) so only 1 iteration runs
+            // (loop runs while iteration <= max, so if both are 3, runs once then 4 > 3)
+            let resumed_state = RalphState {
+                active: false,
+                mode: loaded_state.mode,
+                iteration: loaded_state.iteration,
+                max_iterations: Some(loaded_state.iteration), // Allow exactly 1 more iteration
+                started_at: Utc::now(),
+                last_iteration_at: None,
+                error_count: loaded_state.error_count,
+                consecutive_errors: 0, // Reset on restart
+                last_error: None,
+                last_commit: loaded_state.last_commit.clone(),
+                idle_iterations: loaded_state.idle_iterations,
+            };
+
+            // Second run: continues from saved state
+            let agent2 = MockAgentProvider::always_succeed("Second run output");
+            let deps2 = LoopDependencies {
+                agent: Box::new(agent2.clone()),
+                sandbox: None,
+                config,
+                project_dir: project_dir.clone(),
+                prompt_file,
+            };
+
+            let result2 = run_loop_core(deps2, resumed_state).await.unwrap();
+
+            // Should run 1 more iteration and hit max
+            assert_eq!(result2.termination_reason, TerminationReason::MaxIterations);
+            assert_eq!(agent2.invocation_count(), 1);
+            // Final iteration should be original + 1
+            assert_eq!(result2.final_iteration, result1.final_iteration + 1);
+        }
+
+        #[tokio::test]
+        async fn test_e2e_loop_validation_error_in_prompt() {
+            // Test: Validation errors are included in subsequent iteration prompts
+            // This verifies the error feedback mechanism works
+            let dir = tempdir().unwrap();
+            let project_dir = dir.path().to_path_buf();
+
+            let prompt_file = project_dir.join("PROMPT_build.md");
+            std::fs::write(&prompt_file, "Initial prompt").unwrap();
+
+            // Agent always succeeds
+            let agent = MockAgentProvider::always_succeed("Output");
+
+            let mut config = test_config();
+            config.validation.enabled = true;
+            // Use 'false' command which always exits non-zero
+            // shell_words::split doesn't interpret shell operators like &&
+            config.validation.command = "false".to_string();
+            config.completion.idle_threshold = 100; // High to force max iterations
+
+            let deps = LoopDependencies {
+                agent: Box::new(agent.clone()),
+                sandbox: None,
+                config,
+                project_dir: project_dir.clone(),
+                prompt_file,
+            };
+
+            let state = test_state(Some(3));
+
+            let result = run_loop_core(deps, state).await.unwrap();
+
+            // Should hit max iterations (validation errors are recoverable)
+            assert_eq!(result.termination_reason, TerminationReason::MaxIterations);
+            // Validation failed each iteration
+            assert_eq!(result.error_count, 3);
+            assert_eq!(agent.invocation_count(), 3);
         }
     }
 }

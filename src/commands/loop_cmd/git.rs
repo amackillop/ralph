@@ -97,6 +97,49 @@ pub(crate) async fn count_successful_commits(cwd: &Path, started_at: DateTime<Ut
     u32::try_from(count.min(u32::MAX as usize)).unwrap_or(u32::MAX)
 }
 
+/// Create a pull request using the `gh` CLI.
+///
+/// Returns the PR URL on success.
+pub(crate) async fn create_pull_request(
+    cwd: &Path,
+    branch: &str,
+    base: &str,
+    title: &str,
+    body: &str,
+) -> Result<String> {
+    info!(
+        "Creating pull request for branch '{}' -> '{}'",
+        branch, base
+    );
+
+    let output = tokio::process::Command::new("gh")
+        .current_dir(cwd)
+        .args([
+            "pr", "create", "--base", base, "--head", branch, "--title", title, "--body", body,
+        ])
+        .output()
+        .await
+        .context("Failed to run gh pr create")?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        bail!("Failed to create PR for branch '{branch}': {stderr}");
+    }
+
+    let pr_url = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    info!("Created PR: {}", pr_url);
+    Ok(pr_url)
+}
+
+/// Check if `gh` CLI is available and authenticated.
+pub(crate) async fn check_gh_available() -> bool {
+    tokio::process::Command::new("gh")
+        .args(["auth", "status"])
+        .output()
+        .await
+        .is_ok_and(|o| o.status.success())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
